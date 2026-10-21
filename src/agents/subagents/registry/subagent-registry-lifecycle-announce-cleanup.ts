@@ -52,7 +52,8 @@ import {
 } from "./subagent-registry-persistence.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import { hasRequesterCompletionCohort } from "./subagent-requester-settle-identity.js";
-import { getSubagentRunRuntimeKey } from "./subagent-run-generation.js";
+import { retainSubagentResultDelivery } from "./subagent-result-delivery-evidence.js";
+import { getSubagentRunRuntimeKey, getSubagentRunIdentity } from "./subagent-run-generation.js";
 import { deleteSubagentSessionForCleanup } from "./subagent-session-cleanup.js";
 
 type RunSubagentAnnounceFlow =
@@ -326,6 +327,8 @@ export const startSubagentAnnounceCleanupFlow = (
     current.requesterSettleWake?.rearmGeneration !== requesterSettleGeneration;
   let latestDeliveryError = getDeliveryLastError(entry);
   let committedDeliveryOwner: SubagentRunRecord | undefined;
+  const receiptRunIdentity = getSubagentRunIdentity(entry);
+  const receiptDeliveryGeneration = entry.delivery?.generation ?? 0;
   const finalizeAnnounceCleanup = async (announceOutcome: SubagentAnnounceFlowOutcome) => {
     assertPersistenceCurrent();
     if (!context.isCleanupAttemptCurrent(entry, cleanupGeneration)) {
@@ -487,6 +490,10 @@ export const startSubagentAnnounceCleanupFlow = (
           ) {
             return false;
           }
+          const evidenceChanged = retainSubagentResultDelivery(draft, delivery, {
+            runIdentity: receiptRunIdentity,
+            deliveryGeneration: receiptDeliveryGeneration,
+          });
           recordAnnounceDeliveryResult(draft, delivery, params.runs);
           const deliveryState = ensureDeliveryState(draft);
           latestDeliveryError =
@@ -504,8 +511,9 @@ export const startSubagentAnnounceCleanupFlow = (
             deliveryState.lastError = latestDeliveryError;
           }
           if (
-            requesterTurnPending ||
-            (!delivery.delivered &&
+            (!evidenceChanged && requesterTurnPending) ||
+            (!evidenceChanged &&
+              !delivery.delivered &&
               previous.delivery?.lastError === latestDeliveryError &&
               previous.delivery?.lastDropReason === deliveryState.lastDropReason &&
               previous.delivery?.disposition === deliveryState.disposition &&

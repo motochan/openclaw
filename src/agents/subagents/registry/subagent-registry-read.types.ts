@@ -1,5 +1,6 @@
 import type { DeliveryContext } from "../../../utils/delivery-context.types.js";
 import type { AgentRunTerminalReplySnapshot } from "../../agent-run-terminal-reply.types.js";
+import type { SubagentAnnounceDeliveryResult } from "../announce/subagent-announce-dispatch.js";
 import type { SpawnSubagentMode } from "../spawn/subagent-spawn.types.js";
 import type { SubagentRunOutcome } from "../subagent-run-outcome.types.js";
 import type { SubagentLifecycleEndedReason } from "./subagent-lifecycle-events.js";
@@ -31,7 +32,16 @@ type SubagentDeliveryDisposition =
   | "ambiguous"
   | "permanent_failure";
 
+export type SubagentResultDeliveryEvidence = {
+  runIdentity: string;
+  deliveryGeneration: number;
+  acceptedParts: NonNullable<SubagentAnnounceDeliveryResult["acceptedResultParts"]>;
+  completeReceipt?: NonNullable<SubagentAnnounceDeliveryResult["completeResultReceipt"]>;
+};
+
 export type SubagentCompletionDeliveryState = {
+  /** Committed owner metadata, never inferred from parent completion or transcript text. */
+  resultDelivery?: SubagentResultDeliveryEvidence;
   status:
     | "not_required"
     | "pending"

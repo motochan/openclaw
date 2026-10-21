@@ -9,6 +9,7 @@ import type {
 } from "./subagent-registry.store.kernel.js";
 import { subagentRunRowVersion, type SubagentRunSqliteRow } from "./subagent-registry.store.row.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { normalizeSubagentResultDelivery } from "./subagent-result-delivery-evidence.js";
 
 type CanonicalSubagentRunRecord = SubagentRunRecord &
   Required<Pick<SubagentRunRecord, "completion" | "delivery">>;
@@ -71,6 +72,12 @@ export function rowToSubagentRunRecord(row: SubagentRunSqliteRow): SubagentRunRe
     payload.delivery.status = "not_required";
   }
   const record = normalizeSubagentRunState(payload);
+  if (record.delivery?.resultDelivery) {
+    record.delivery.resultDelivery = normalizeSubagentResultDelivery(
+      record,
+      record.delivery.resultDelivery,
+    );
+  }
   if (!record.runId || !record.childSessionKey || !record.requesterSessionKey) {
     return null;
   }
@@ -80,6 +87,12 @@ export function rowToSubagentRunRecord(row: SubagentRunSqliteRow): SubagentRunRe
 /** Canonically serializes a run before an outer transaction acquires the write lock. */
 export function bindSubagentRunRecord(entry: SubagentRunRecord): SubagentRunSqliteRow {
   const normalized = normalizeSubagentRunState(structuredClone(entry));
+  if (normalized.delivery?.resultDelivery) {
+    normalized.delivery.resultDelivery = normalizeSubagentResultDelivery(
+      normalized,
+      normalized.delivery.resultDelivery,
+    );
+  }
   if (!isCanonicalSubagentRunRecord(normalized)) {
     throw new Error("subagent run is missing canonical nested state");
   }

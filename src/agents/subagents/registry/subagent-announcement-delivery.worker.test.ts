@@ -1,6 +1,7 @@
 // Preserve fixture setup before production consumers.
 // oxfmt-ignore
 import { useSubagentControlFixture } from "./subagent-control.test-support.js";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { beforeEach, expect, it, vi } from "vitest";
 import {
@@ -25,6 +26,7 @@ import * as stateWorker from "../../../state/openclaw-state-worker-store.js";
 import { setTestEnvValue, withEnvAsync } from "../../../test-utils/env.js";
 import { loadAgentRuntimePluginRegistryHandle } from "../../runtime-plugins.js";
 import { isSubagentRegistryWriteCommand } from "../../subagent-test-fixtures.test-helpers.js";
+import type { SubagentAnnounceDeliveryResult } from "../announce/subagent-announce-dispatch.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
 import { restoreSubagentRunsFromDisk } from "./subagent-registry-persistence.js";
 import { subscribeSubagentRunChanges } from "./subagent-registry-publication.js";
@@ -40,6 +42,7 @@ import {
 import { writeSubagentSessionEntry } from "./subagent-registry.persistence.test-support.js";
 import { rowToSubagentRunRecord } from "./subagent-registry.store.codec.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+import { getSubagentRunIdentity } from "./subagent-run-generation.js";
 
 vi.mock("../../../state/openclaw-state-worker-store.js", { spy: true });
 vi.mock("./subagent-registry-read-cache.js", { spy: true });
@@ -94,6 +97,7 @@ async function registerCompletion(
     cleanup?: "keep" | "delete";
     expectsCompletionMessage?: boolean;
     requesterSessionKey?: string;
+    requesterOrigin?: SubagentRunRecord["requesterOrigin"];
   } = {},
 ) {
   const childSessionKey = `agent:main:subagent:${runId}`;
@@ -133,6 +137,7 @@ async function registerCompletion(
     childSessionKey,
     requesterSessionKey: options.requesterSessionKey ?? "agent:main:main",
     requesterAgentId: "main",
+    requesterOrigin: options.requesterOrigin,
     requesterDisplayKey: "main",
     task: "retain ordinary cleanup before requester settlement",
     cleanup: options.cleanup ?? "keep",
@@ -699,3 +704,196 @@ it.for(["current", "successor", "revoked", "source switched"] as const)(
     }
   },
 );
+
+function acceptedChildResult(
+  entry: SubagentRunRecord,
+  complete = true,
+): SubagentAnnounceDeliveryResult {
+  const text = "Synthetic completed result.";
+  const result = {
+    runId: entry.runId,
+    childSessionKey: entry.childSessionKey,
+    requesterSessionKey: entry.requesterSessionKey,
+    runIdentity: getSubagentRunIdentity(entry),
+    resultHash: createHash("sha256").update(text).digest("hex"),
+    utf8ByteLength: Buffer.byteLength(text),
+  };
+  const acceptedAtMs = Date.now();
+  return {
+    delivered: complete,
+    path: "direct",
+    deliveredAt: acceptedAtMs,
+    ...(complete
+      ? {}
+      : { disposition: "permanent_failure", terminal: true, error: "second part rejected" }),
+    acceptedResultParts: [
+      {
+        platformMessageId: "501",
+        acceptance: {
+          channel: "telegram",
+          accountId: "default",
+          to: "123",
+          threadId: null,
+          acceptedAtMs,
+        },
+      },
+    ],
+    ...(complete
+      ? {
+          completeResultPresentation: result,
+          completeResultReceipt: {
+            result: structuredClone(result),
+            platformMessageIds: ["501"],
+            acceptedAtMs,
+            scope: "complete",
+          },
+        }
+      : {}),
+  };
+}
+
+it.each([
+  "complete",
+  "partial",
+  "child",
+  "hash",
+  "generation",
+  "account",
+  "thread",
+  "duplicate",
+  "observer",
+] as const)("retains native worker-backed result evidence across reopen (%s)", async (mode) => {
+  const run = await registerCompletion(`result-evidence-${mode}`, {
+    requesterOrigin: { channel: "telegram", to: "123", accountId: "default" },
+  });
+  fixture.announce.mockImplementation(async (params) => {
+    const delivery = acceptedChildResult(subagentRuns.get(run.runId)!, mode !== "partial");
+    if (mode === "child")
+      delivery.completeResultReceipt!.result = {
+        ...delivery.completeResultReceipt!.result,
+        childSessionKey: "agent:main:subagent:other",
+      };
+    if (mode === "hash")
+      delivery.completeResultReceipt!.result = {
+        ...delivery.completeResultReceipt!.result,
+        resultHash: "0".repeat(64),
+      };
+    if (mode === "generation")
+      delivery.completeResultReceipt!.result = {
+        ...delivery.completeResultReceipt!.result,
+        runIdentity: "stale-generation",
+      };
+    if (mode === "account" || mode === "thread")
+      delivery.acceptedResultParts = [
+        {
+          platformMessageId: "501",
+          acceptance: {
+            ...delivery.acceptedResultParts![0].acceptance,
+            ...(mode === "account" ? { accountId: "other" } : { threadId: "77" }),
+          },
+        },
+      ];
+    await params.onDeliveryResult?.(delivery);
+    if (mode === "duplicate") {
+      await params.onDeliveryResult?.(delivery);
+      await params.onDeliveryResult?.({
+        ...delivery,
+        completeResultReceipt: {
+          ...delivery.completeResultReceipt!,
+          result: { ...delivery.completeResultReceipt!.result, resultHash: "f".repeat(64) },
+        },
+      });
+    }
+    if (mode === "observer") throw new Error("Synthetic observer failed after durable acceptance");
+    return mode === "partial" ? "permanent_failure" : "delivered";
+  });
+  completeRegistered(run);
+  await fixture.settle();
+  const before = loadSubagentRegistryFromSqlite().get(run.runId)?.delivery?.resultDelivery;
+  if (mode === "account" || mode === "thread") expect(before).toBeUndefined();
+  else {
+    expect(before?.acceptedParts.map((part) => part.platformMessageId)).toEqual(["501"]);
+    if (["complete", "duplicate", "observer"].includes(mode))
+      expect(before?.completeReceipt?.scope).toBe("complete");
+    else expect(before?.completeReceipt).toBeUndefined();
+  }
+  await closeOpenClawStateDatabaseAsync();
+  await restoreSubagentRunsFromDisk({ runs: subagentRuns });
+  expect(loadSubagentRegistryFromSqlite().get(run.runId)?.delivery?.resultDelivery).toEqual(before);
+  expect(fixture.announce).toHaveBeenCalledOnce();
+  // A partial failure may wake its parent for follow-up; it must not resend the child.
+  expect(turns.start).toHaveBeenCalledTimes(mode === "partial" ? 1 : 0);
+});
+
+it("preserves complete result evidence when native commit acknowledgement is lost", async () => {
+  const run = await registerCompletion("result-evidence-lost-ack", {
+    requesterOrigin: { channel: "telegram", to: "123", accountId: "default" },
+  });
+  fixture.announce.mockImplementation(async (params) => {
+    await params.onDeliveryResult?.(acceptedChildResult(subagentRuns.get(run.runId)!));
+    return "delivered";
+  });
+  let lost = false;
+  const worker = vi
+    .spyOn(stateWorker, "runOpenClawStateWorkerOperation")
+    .mockImplementation((context, operation, options) => {
+      let admission: SqliteWorkerOperationAdmission | undefined;
+      const createAdmission = options?.createAdmission;
+      return nativeWorker.runOpenClawStateWorkerOperation(
+        context,
+        (scope) =>
+          operation({
+            async execute(command, executeOptions) {
+              const receiptWrite =
+                !lost &&
+                isSubagentRegistryWriteCommand(command) &&
+                command.input.values.some(
+                  (row) =>
+                    row.run_id === run.runId &&
+                    rowToSubagentRunRecord(row)?.delivery?.resultDelivery?.completeReceipt,
+                );
+              const result = await scope.execute(command, executeOptions);
+              if (receiptWrite) {
+                lost = true;
+                admission?.service();
+                if (!admission?.committed) throw new Error("No native committed facts");
+                Object.defineProperty(admission, "committed", { value: { facts: undefined } });
+                throw new SqliteWorkerError("Synthetic lost result receipt ACK", "outcome-unknown");
+              }
+              return result;
+            },
+          }),
+        {
+          ...options,
+          createAdmission: createAdmission
+            ? (operationAdmission) => {
+                const created = createAdmission(operationAdmission);
+                admission = created.admission;
+                return created;
+              }
+            : undefined,
+        },
+      );
+    });
+  try {
+    completeRegistered(run);
+    await expect(fixture.settle()).rejects.toMatchObject({ name: "AggregateError" });
+    expect(lost).toBe(true);
+    expect(
+      loadSubagentRegistryFromSqlite().get(run.runId)?.delivery?.resultDelivery?.completeReceipt
+        ?.platformMessageIds,
+    ).toEqual(["501"]);
+    resumeSubagentRun(run.runId);
+    await fixture.settle();
+    expect(fixture.announce).toHaveBeenCalledOnce();
+  } finally {
+    worker.mockRestore();
+    await fixture.settle();
+    await closeOpenClawStateDatabaseAsync();
+    await restoreSubagentRunsFromDisk({ runs: subagentRuns });
+  }
+  expect(
+    loadSubagentRegistryFromSqlite().get(run.runId)?.delivery?.resultDelivery?.completeReceipt
+      ?.platformMessageIds,
+  ).toEqual(["501"]);
+});
