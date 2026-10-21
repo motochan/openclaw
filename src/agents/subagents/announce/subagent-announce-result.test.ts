@@ -132,6 +132,72 @@ describe("exact-run announcement results", () => {
     expect(child.completion?.terminalReply).toBe(terminalReply);
     expect(terminalReply).toEqual({ disposition: "visible", text: `${text.slice(0, 4_095)}…` });
     expect(prepared.isCurrent()).toBe(true);
+    // Prompt inclusion is not a complete child-result presentation or receipt.
+    expect(prepared.completeResult).toBeUndefined();
+  });
+
+  it("binds the complete retained result rather than the identical bounded prefix", async () => {
+    const firstText = `${"x".repeat(5_000)}first-tail`;
+    const otherText = `${"x".repeat(5_000)}other-tail`;
+    const child = completedChild(firstText);
+    const snapshot = child.completion?.terminalReply;
+    installTranscript([assistant(child.runId, firstText)]);
+    const first = await readSubagentRunAnnounceResult(child);
+    expect(first.completeResult).toMatchObject({
+      runId: child.runId,
+      childSessionKey: child.childSessionKey,
+      requesterSessionKey: child.requesterSessionKey,
+      resultHash: "7e1853cae98f945a34ab31bb175120830899711c75aa114636b78f259ecc5a83",
+      utf8ByteLength: 5_010,
+    });
+    expect(Object.isFrozen(first.completeResult)).toBe(true);
+
+    installTranscript([assistant(child.runId, otherText)]);
+    const other = await readSubagentRunAnnounceResult(child);
+    expect(other.completeResult?.resultHash).toBe(
+      "f46846065158d83878450632f82367950de21f49ae1a3183e1f8c2a4eb87d972",
+    );
+    expect(other.completeResult?.runIdentity).toBe(first.completeResult?.runIdentity);
+    expect(child.completion?.terminalReply).toBe(snapshot);
+    expect(snapshot).toEqual({ disposition: "visible", text: `${"x".repeat(4_095)}…` });
+  });
+
+  it("does not label a retention fallback as a complete result", async () => {
+    const child = completedChild("bounded evidence");
+    installTranscript([]);
+    const prepared = await readSubagentRunAnnounceResult(child);
+    expect(prepared.text).toContain("truncated-by-retention");
+    expect(prepared.completeResult).toBeUndefined();
+  });
+
+  it.each(["generation", "requesterSessionKey"] as const)(
+    "invalidates prepared identity after an in-place %s change",
+    async (field) => {
+      const child = completedChild("original answer");
+      installTranscript([assistant(child.runId, "original answer")]);
+      const prepared = await readSubagentRunAnnounceResult(child);
+      expect(prepared.completeResult).toBeDefined();
+      expect(prepared.isCurrent()).toBe(true);
+      if (field === "generation") {
+        child.generation = (child.generation ?? 0) + 1;
+      } else {
+        child.requesterSessionKey = "agent:other:main";
+      }
+      expect(prepared.isCurrent()).toBe(false);
+    },
+  );
+
+  it("rejects an in-place generation change during the exact result read", async () => {
+    const child = completedChild("original answer");
+    testing.setDepsForTest({
+      findTranscriptEvent: async () => {
+        child.generation = (child.generation ?? 0) + 1;
+        return { event: assistant(child.runId, "original answer") };
+      },
+    });
+    await expect(readSubagentRunAnnounceResult(child)).rejects.toThrow(
+      "transcript identity changed during announcement",
+    );
   });
 
   it.each(["silent", "empty"] as const)(
@@ -149,6 +215,7 @@ describe("exact-run announcement results", () => {
         text: undefined,
       });
       expect(findTranscriptEvent).not.toHaveBeenCalled();
+      expect((await readSubagentRunAnnounceResult(child)).completeResult).toBeUndefined();
     },
   );
 

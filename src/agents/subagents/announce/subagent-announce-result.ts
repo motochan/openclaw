@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16WithEllipsis } from "../../../shared/text-truncate.js";
@@ -6,7 +7,10 @@ import { extractStoredAssistantText } from "../../tools/chat-history-text.js";
 import { resolveSubagentCompletionResultText } from "../completion/subagent-completion-result.js";
 import { SUBAGENT_ENDED_REASON_KILLED } from "../registry/subagent-lifecycle-events.js";
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
-import { isSameSubagentRunOwner } from "../registry/subagent-run-generation.js";
+import {
+  getSubagentRunIdentity,
+  isSameSubagentRunOwner,
+} from "../registry/subagent-run-generation.js";
 
 const MAX_CHILD_COMPLETION_FIELD_CHARS = 256;
 
@@ -23,7 +27,23 @@ type SubagentAnnounceResultDeps = Pick<
   findSessionTranscriptArchiveEventReadOnly: typeof import("../../../config/sessions/session-history.js").findSessionTranscriptArchiveEventReadOnly;
 };
 
-export type PreparedAnnounceResult = { text: string | undefined; isCurrent: () => boolean };
+/** Exact retained result identity, not presentation membership or delivery evidence. */
+export type PreparedCompleteSubagentResult = Readonly<{
+  runId: string;
+  childSessionKey: string;
+  requesterSessionKey: string;
+  runIdentity: string;
+  /** SHA256 of the complete prepared text UTF-8 bytes, before channel transformations. */
+  resultHash: string;
+  utf8ByteLength: number;
+}>;
+
+export type PreparedAnnounceResult = {
+  text: string | undefined;
+  isCurrent: () => boolean;
+  /** Absent for bounded lifecycle evidence, missing retained results, and parent synthesis. */
+  completeResult?: PreparedCompleteSubagentResult;
+};
 
 export class SubagentAnnouncePreparationConflictError extends Error {
   override name = "SubagentAnnouncePreparationConflictError";
@@ -52,10 +72,12 @@ function captureAnnounceResultAuthority(
 ): () => boolean {
   const facts = structuredClone(announceResultFacts(child));
   const runId = child.runId;
+  const identity = getSubagentRunIdentity(child);
   return () => {
     const current = readSubagentRun(runId);
     return Boolean(
       current &&
+      getSubagentRunIdentity(current) === identity &&
       isSameSubagentRunOwner(current, child) &&
       isDeepStrictEqual(announceResultFacts(current), facts),
     );
@@ -115,7 +137,18 @@ export async function readSubagentRunAnnounceResultUsing(
       isCurrent,
     };
   }
-  return { text: answer, isCurrent };
+  return {
+    text: answer,
+    isCurrent,
+    completeResult: Object.freeze({
+      runId: child.runId,
+      childSessionKey: child.childSessionKey,
+      requesterSessionKey: child.requesterSessionKey,
+      runIdentity: getSubagentRunIdentity(child),
+      resultHash: createHash("sha256").update(answer, "utf8").digest("hex"),
+      utf8ByteLength: Buffer.byteLength(answer, "utf8"),
+    }),
+  };
 }
 
 function describeSubagentOutcome(child: ChildCompletionRow): string {
