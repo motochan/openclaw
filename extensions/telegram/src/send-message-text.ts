@@ -100,8 +100,12 @@ export function createTelegramTextSender(config: {
     let textCoverage: "complete" | "partial" | undefined;
     const buildReceipt = () => {
       const receipt = sender.buildReceipt(start, "text");
-      if (receipt.parts.length === 0) return undefined;
-      if (textCoverage) receipt.textCoverage = textCoverage;
+      if (receipt.parts.length === 0) {
+        return undefined;
+      }
+      if (textCoverage) {
+        receipt.textCoverage = textCoverage;
+      }
       if (acceptedReplyToMessageId !== undefined) {
         receipt.replyToId = String(acceptedReplyToMessageId);
       }

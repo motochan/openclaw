@@ -768,11 +768,15 @@ it.each([
   });
   fixture.announce.mockImplementation(async (params) => {
     const entry = subagentRuns.get(run.runId);
-    if (!entry) throw new Error("Fixture requires the registered child run");
+    if (!entry) {
+      throw new Error("Fixture requires the registered child run");
+    }
     const delivery = acceptedChildResult(entry, mode !== "partial");
     if (mode === "child" || mode === "hash" || mode === "generation") {
       const receipt = delivery.completeResultReceipt;
-      if (!receipt) throw new Error("Fixture requires a complete result receipt");
+      if (!receipt) {
+        throw new Error("Fixture requires a complete result receipt");
+      }
       delivery.completeResultReceipt = {
         ...receipt,
         result: {
@@ -787,7 +791,9 @@ it.each([
     }
     if (mode === "account" || mode === "thread") {
       const firstPart = delivery.acceptedResultParts?.[0];
-      if (!firstPart) throw new Error("Fixture requires an accepted physical part");
+      if (!firstPart) {
+        throw new Error("Fixture requires an accepted physical part");
+      }
       delivery.acceptedResultParts = [
         {
           platformMessageId: "501",
@@ -801,7 +807,9 @@ it.each([
     await params.onDeliveryResult?.(delivery);
     if (mode === "duplicate") {
       const receipt = delivery.completeResultReceipt;
-      if (!receipt) throw new Error("Fixture requires a complete result receipt");
+      if (!receipt) {
+        throw new Error("Fixture requires a complete result receipt");
+      }
       await params.onDeliveryResult?.(delivery);
       await params.onDeliveryResult?.({
         ...delivery,
@@ -811,18 +819,23 @@ it.each([
         },
       });
     }
-    if (mode === "observer") throw new Error("Synthetic observer failed after durable acceptance");
+    if (mode === "observer") {
+      throw new Error("Synthetic observer failed after durable acceptance");
+    }
     return mode === "partial" ? "permanent_failure" : "delivered";
   });
   completeRegistered(run);
   await fixture.settle();
   const before = loadSubagentRegistryFromSqlite().get(run.runId)?.delivery?.resultDelivery;
-  if (mode === "account" || mode === "thread") expect(before).toBeUndefined();
-  else {
+  if (mode === "account" || mode === "thread") {
+    expect(before).toBeUndefined();
+  } else {
     expect(before?.acceptedParts.map((part) => part.platformMessageId)).toEqual(["501"]);
-    if (["complete", "duplicate", "observer"].includes(mode))
+    if (["complete", "duplicate", "observer"].includes(mode)) {
       expect(before?.completeReceipt?.scope).toBe("complete");
-    else expect(before?.completeReceipt).toBeUndefined();
+    } else {
+      expect(before?.completeReceipt).toBeUndefined();
+    }
   }
   await closeOpenClawStateDatabaseAsync();
   await restoreSubagentRunsFromDisk({ runs: subagentRuns });
@@ -863,7 +876,9 @@ it("preserves complete result evidence when native commit acknowledgement is los
               if (receiptWrite) {
                 lost = true;
                 admission?.service();
-                if (!admission?.committed) throw new Error("No native committed facts");
+                if (!admission?.committed) {
+                  throw new Error("No native committed facts");
+                }
                 Object.defineProperty(admission, "committed", { value: { facts: undefined } });
                 throw new SqliteWorkerError("Synthetic lost result receipt ACK", "outcome-unknown");
               }

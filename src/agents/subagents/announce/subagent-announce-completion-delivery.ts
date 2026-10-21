@@ -20,7 +20,6 @@ import { normalizeOutboundReplyPayloadCore } from "../../../infra/outbound/reply
 import { sourceDeliveryTargetsMatch } from "../../../infra/outbound/source-delivery-plan.js";
 import { splitMediaFromOutput } from "../../../media/parse.js";
 import { shouldPreserveUserFacingSessionStateForInputProvenance } from "../../../sessions/input-provenance.js";
-import { deriveSessionChatTypeFromKey } from "../../../sessions/session-chat-type-shared.js";
 import { isNonTerminalAgentRunStatus } from "../../../shared/agent-run-status.js";
 import type { DeliveryContext } from "../../../utils/delivery-context.types.js";
 import { buildAgentRunTerminalOutcomeFromWaitResult } from "../../agent-run-terminal-outcome.js";
@@ -50,12 +49,14 @@ import {
   type SubagentAnnounceDeliveryResult,
 } from "./subagent-announce-dispatch.js";
 import type { SubagentCompletionToolHandoffRegistration } from "./subagent-announce-handoff.js";
-import { inferDeliveryTargetChatType } from "./subagent-announce-origin.js";
+import { isDirectMessageDeliveryTarget } from "./subagent-announce-origin.js";
 import type {
   PreparedAnnounceResult,
   PreparedCompleteSubagentResult,
 } from "./subagent-announce-result.js";
 import { dispatchGatewayMethodInProcess } from "./subagent-announce.runtime.js";
+
+export { isDirectMessageDeliveryTarget } from "./subagent-announce-origin.js";
 
 export async function runAnnounceAgentCall(params: {
   agentParams: Record<string, unknown>;
@@ -271,20 +272,6 @@ export function buildRequesterCompletionDeliveryResult(
     ...(finalCommitted ? { requesterVisibleFinalDelivered: true } : {}),
     ...(finalAssistantVisibleText ? { finalAssistantVisibleText } : {}),
   };
-}
-
-export function isDirectMessageDeliveryTarget(
-  target: { channel?: string; to?: string; threadId?: string },
-  requesterSessionKey: string,
-): boolean {
-  if (target.threadId) {
-    return false;
-  }
-  const targetChatType = inferDeliveryTargetChatType(target);
-  if (targetChatType) {
-    return targetChatType === "direct";
-  }
-  return deriveSessionChatTypeFromKey(requesterSessionKey) === "direct";
 }
 
 type DirectCompletionContent = {
@@ -511,7 +498,9 @@ export async function deliverCompletionDirect(params: {
       }
       const previous = acceptedParts.get(part.platformMessageId);
       if (previous) {
-        if (previous.acceptance.acceptedAtMs !== acceptance.acceptedAtMs) acceptanceUnknown = true;
+        if (previous.acceptance.acceptedAtMs !== acceptance.acceptedAtMs) {
+          acceptanceUnknown = true;
+        }
         continue;
       }
       acceptedParts.set(
@@ -657,9 +646,13 @@ export async function deliverCompletionDirect(params: {
           retainReceipt(current.deliveryResult.receipt);
           current = current.cause;
         } else if (isOutboundDeliveryError(current)) {
-          for (const result of current.results) retainReceipt(result.receipt);
+          for (const result of current.results) {
+            retainReceipt(result.receipt);
+          }
           current = current.cause;
-        } else break;
+        } else {
+          break;
+        }
       }
       return {
         ...(acceptedParts.size ? { acceptedResultParts: snapshotAcceptedParts() } : {}),

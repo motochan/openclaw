@@ -24,12 +24,15 @@ export function normalizeSubagentResultDelivery(
     !Array.isArray(value.acceptedParts) ||
     value.acceptedParts.length === 0 ||
     value.acceptedParts.length > 4_096
-  )
+  ) {
     return undefined;
+  }
   const parts: Array<SubagentResultDeliveryEvidence["acceptedParts"][number]> = [];
   const ids = new Set<string>();
   for (const part of value.acceptedParts) {
-    if (!isRecord(part) || !isRecord(part.acceptance)) return undefined;
+    if (!isRecord(part) || !isRecord(part.acceptance)) {
+      return undefined;
+    }
     const accepted = part.acceptance;
     if (
       typeof part.platformMessageId !== "string" ||
@@ -42,8 +45,9 @@ export function normalizeSubagentResultDelivery(
       typeof accepted.acceptedAtMs !== "number" ||
       !Number.isFinite(accepted.acceptedAtMs) ||
       accepted.acceptedAtMs <= 0
-    )
+    ) {
       return undefined;
+    }
     ids.add(part.platformMessageId);
     parts.push({
       platformMessageId: part.platformMessageId,
@@ -62,8 +66,12 @@ export function normalizeSubagentResultDelivery(
     acceptedParts: parts,
   };
   const receipt = value.completeReceipt;
-  if (receipt === undefined) return evidence;
-  if (!isRecord(receipt) || !isRecord(receipt.result)) return evidence;
+  if (receipt === undefined) {
+    return evidence;
+  }
+  if (!isRecord(receipt) || !isRecord(receipt.result)) {
+    return evidence;
+  }
   const result = receipt.result;
   if (
     receipt.scope !== "complete" ||
@@ -79,8 +87,9 @@ export function normalizeSubagentResultDelivery(
     !Array.isArray(receipt.platformMessageIds) ||
     !isDeepStrictEqual(receipt.platformMessageIds, [...ids]) ||
     receipt.acceptedAtMs !== Math.max(...parts.map((part) => part.acceptance.acceptedAtMs))
-  )
+  ) {
     return evidence;
+  }
   evidence.completeReceipt = {
     result: {
       runId: entry.runId,
@@ -108,8 +117,9 @@ export function retainSubagentResultDelivery(
     getSubagentRunIdentity(entry) !== expected.runIdentity ||
     (entry.delivery.generation ?? 0) !== expected.deliveryGeneration ||
     delivery.path !== "direct"
-  )
+  ) {
     return false;
+  }
   const complete =
     delivery.delivered &&
     delivery.completeResultReceipt &&
@@ -121,22 +131,31 @@ export function retainSubagentResultDelivery(
     acceptedParts: delivery.acceptedResultParts,
     completeReceipt: complete,
   });
-  if (!next) return false;
+  if (!next) {
+    return false;
+  }
   const prior = entry.delivery.resultDelivery;
   if (prior) {
     if (
       prior.runIdentity !== next.runIdentity ||
       prior.deliveryGeneration !== next.deliveryGeneration
-    )
+    ) {
       return false;
-    if (prior.completeReceipt) return false; // A replay or conflicting receipt cannot replace settled facts.
+    }
+    if (prior.completeReceipt) {
+      return false;
+    } // A replay or conflicting receipt cannot replace settled facts.
     for (const part of prior.acceptedParts) {
       const incoming = next.acceptedParts.find(
         (item) => item.platformMessageId === part.platformMessageId,
       );
-      if (!incoming || !isDeepStrictEqual(incoming, part)) return false;
+      if (!incoming || !isDeepStrictEqual(incoming, part)) {
+        return false;
+      }
     }
-    if (isDeepStrictEqual(prior, next)) return false;
+    if (isDeepStrictEqual(prior, next)) {
+      return false;
+    }
   }
   entry.delivery.resultDelivery = next;
   return true;
@@ -155,13 +174,14 @@ export function projectSubagentResultDelivery(entry: SubagentRunRecord) {
   };
   const evidence = normalizeSubagentResultDelivery(entry, entry.delivery?.resultDelivery);
   const firstPart = evidence?.acceptedParts[0];
-  if (!evidence || !firstPart)
+  if (!evidence || !firstPart) {
     return {
       ...base,
       status: "UNKNOWN",
       reportDelivery: "UNKNOWN",
       reason: "no_valid_committed_receipt",
     };
+  }
   if (
     evidence.acceptedParts.length > 128 ||
     evidence.acceptedParts.some(

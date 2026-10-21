@@ -263,10 +263,18 @@ describe("bounded committed native delivery receipt list", () => {
     "keeps %s evidence UNKNOWN",
     async (mode) => {
       const entry = receiptRun();
-      if (mode === "parent") delete entry.delivery!.resultDelivery;
-      if (mode === "stale") entry.generation = 2;
-      if (mode === "malformed") entry.delivery!.resultDelivery!.acceptedParts = [];
-      if (mode === "account") entry.requesterOrigin!.accountId = "other";
+      if (mode === "parent") {
+        delete entry.delivery!.resultDelivery;
+      }
+      if (mode === "stale") {
+        entry.generation = 2;
+      }
+      if (mode === "malformed") {
+        entry.delivery!.resultDelivery!.acceptedParts = [];
+      }
+      if (mode === "account") {
+        entry.requesterOrigin!.accountId = "other";
+      }
       const result = await tool().execute("list", { action: "list", runIds: [entry.runId] });
       expect(result.details).toMatchObject({
         receipts: [{ status: "UNKNOWN", reportDelivery: "UNKNOWN" }],

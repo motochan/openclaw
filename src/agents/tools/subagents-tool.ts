@@ -369,8 +369,9 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
         const { cfg, controller, readable, controlled } = readCurrentScope();
         if (action === "list" && params.runIds !== undefined) {
           const runIds = [...new Set(readStringArrayParam(params, "runIds", { required: true }))];
-          if (runIds.length > 32)
+          if (runIds.length > 32) {
             throw new ToolInputError("At most 32 delivery receipts may be read");
+          }
           const visible = new Set(readable.map((entry) => entry.runId));
           const selected = runIds.filter((id) => visible.has(id));
           const prepared = await prepareSubagentRunsSnapshotForRunIds(subagentRuns, selected);
@@ -384,8 +385,9 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
             const returned = new Set(receipts.map((receipt) => receipt.runId));
             return { receipts, unavailable: runIds.filter((id) => !returned.has(id)) };
           });
-          if (!projection.ready)
+          if (!projection.ready) {
             throw new Error("Subagent receipt read changed during preparation; retry the read");
+          }
           return jsonResult({ status: "ok", action, ...projection.value });
         }
         if (action === "list") {

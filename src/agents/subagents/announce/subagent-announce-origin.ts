@@ -321,3 +321,17 @@ export function resolveGeneratedMediaSessionDeliveryRoute(params: {
     deliveryContext,
   };
 }
+
+export function isDirectMessageDeliveryTarget(
+  target: { channel?: string; to?: string; threadId?: string },
+  requesterSessionKey: string,
+): boolean {
+  if (target.threadId) {
+    return false;
+  }
+  const targetChatType = inferDeliveryTargetChatType(target);
+  if (targetChatType) {
+    return targetChatType === "direct";
+  }
+  return deriveSessionChatTypeFromKey(requesterSessionKey) === "direct";
+}

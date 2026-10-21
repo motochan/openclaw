@@ -2062,6 +2062,10 @@ describe("deliverOutboundPayloads", () => {
     );
     expect(onDeliveredPayload).toHaveBeenCalledWith(
       expect.objectContaining({ text: caption, mediaUrls }),
+      [
+        { channel: "line", messageId: "fmt-media:file:///tmp/f.png:album" },
+        { channel: "line", messageId: "fmt-media:file:///tmp/g.png:" },
+      ],
     );
     expect(sendFormattedMediaCall?.mediaLocalRoots).toContain(expectedPreferredTmpRoot);
     expect(
@@ -3109,6 +3113,7 @@ describe("deliverOutboundPayloads", () => {
       expect(requireMockCallArg(sendText, "sendText").text).toBe("caption");
       expect(onDeliveredPayload).toHaveBeenCalledWith(
         expect.objectContaining({ text: "caption", mediaUrls: [] }),
+        [{ channel: "matrix", messageId: "mx-1" }],
       );
       expect(
         requireMockCallArg(afterDeliverPayload, "after delivered payload").payload,

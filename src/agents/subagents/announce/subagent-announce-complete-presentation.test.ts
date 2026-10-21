@@ -94,10 +94,12 @@ async function fixture(
             api: {
               sendMessage: async (_chatId, physicalText) => {
                 physicalCalls++;
-                if (options.native === "silent-tail" && received.length === 1)
+                if (options.native === "silent-tail" && received.length === 1) {
                   throw new Error("Bad Request: message text is empty");
-                if (options.native === "partial" && received.length === 1)
+                }
+                if (options.native === "partial" && received.length === 1) {
                   throw new Error("physical second part rejected");
+                }
                 received.push(physicalText);
                 return {
                   message_id:
@@ -119,21 +121,24 @@ async function fixture(
               if (
                 options.native === "observer-first" ||
                 (options.native === "observer-tail" && received.length === 2)
-              )
+              ) {
                 throw new Error("observer failed before forwarding");
+              }
               await onDeliveryResult?.({
                 channel: "telegram",
                 messageId: delivery.messageId,
                 receipt: delivery.receipt,
                 target: { kind: "chat", id: delivery.chatId },
               });
-              if (options.native === "observer" && received.length === 2)
+              if (options.native === "observer" && received.length === 2) {
                 throw new Error("physical observer failed after accept");
+              }
             },
           });
           terminalCoverage = sent.receipt?.textCoverage;
-          if (options.native === "unknown-coverage" && sent.receipt)
+          if (options.native === "unknown-coverage" && sent.receipt) {
             delete sent.receipt.textCoverage;
+          }
           return {
             channel: "telegram",
             messageId: sent.messageId,
@@ -176,7 +181,9 @@ async function fixture(
     preparedResult: prepared,
   };
   const completionEvent = params.internalEvents?.[0];
-  if (!completionEvent) throw new Error("Fixture requires one completion event");
+  if (!completionEvent) {
+    throw new Error("Fixture requires one completion event");
+  }
   return {
     child,
     prepared,
@@ -302,12 +309,15 @@ describe("complete direct result presentation", () => {
     "rejects %s mismatches without claiming complete membership",
     async (mismatch) => {
       const f = await fixture();
-      if (mismatch === "run") f.params.sourceRunId = "different-run";
-      else if (mismatch === "child")
+      if (mismatch === "run") {
+        f.params.sourceRunId = "different-run";
+      } else if (mismatch === "child") {
         f.completionEvent.childSessionKey = "agent:main:subagent:other";
-      else {
+      } else {
         const identity = f.prepared.completeResult;
-        if (!identity) throw new Error("Fixture requires complete retained identity");
+        if (!identity) {
+          throw new Error("Fixture requires complete retained identity");
+        }
         f.prepared.completeResult = {
           ...identity,
           ...(mismatch === "hash" ? { resultHash: "0".repeat(64) } : { utf8ByteLength: 1 }),
@@ -343,7 +353,9 @@ describe("complete direct result presentation", () => {
             }
           : {},
       );
-      if (when === "before") f.child.generation = 3;
+      if (when === "before") {
+        f.child.generation = 3;
+      }
       const result = await f.deliver();
       expect(f.received).toHaveLength(0);
       expect(result?.completeResultPresentation).toBeUndefined();

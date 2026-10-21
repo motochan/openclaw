@@ -128,11 +128,14 @@ export function createTelegramPreparedSender(config: {
     const receipt = {
       ...details?.receipt,
       ...acceptedReceipt,
-      parts: acceptedReceipt.parts.map((part) => ({
-        ...part,
-        ...priorParts.get(part.platformMessageId),
-        ...(part.acceptance ? { acceptance: part.acceptance } : {}),
-      })),
+      parts: acceptedReceipt.parts.map((part) =>
+        Object.assign(
+          {},
+          part,
+          priorParts.get(part.platformMessageId),
+          part.acceptance ? { acceptance: part.acceptance } : {},
+        ),
+      ),
     };
     throw mergeTelegramPartialDeliveryError(error, {
       ...details,
