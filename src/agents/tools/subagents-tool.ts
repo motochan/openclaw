@@ -35,6 +35,7 @@ import {
   prepareSubagentSessionListReadCache,
 } from "../subagents/registry/subagent-registry-state.js";
 import type { SubagentRunRecord } from "../subagents/registry/subagent-registry.types.js";
+import { projectSubagentResultDelivery } from "../subagents/registry/subagent-result-delivery-evidence.js";
 import { isSameSubagentRunOwner } from "../subagents/registry/subagent-run-generation.js";
 import {
   jsonResult,
@@ -276,7 +277,7 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
     name: "subagents",
     parameters: SubagentsToolSchema,
     description:
-      "List native subagents, wait for selected runIds, or cancel a runId and its descendants. A wait timeout never cancels execution or consumes completion delivery.",
+      "List native subagents, wait for selected runIds, or cancel a runId and its descendants. List with runIds returns scoped committed delivery metadata (max32 runs,128 physical parts each; over-limit evidence remains UNKNOWN). A wait timeout never cancels execution or consumes completion delivery.",
     execute: async (_toolCallId, args, signal) => {
       const params = args as Record<string, unknown>;
       const action = readToolStringParam(params, "action") ?? "list";
@@ -366,6 +367,27 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
           });
         }
         const { cfg, controller, readable, controlled } = readCurrentScope();
+        if (action === "list" && params.runIds !== undefined) {
+          const runIds = [...new Set(readStringArrayParam(params, "runIds", { required: true }))];
+          if (runIds.length > 32)
+            throw new ToolInputError("At most 32 delivery receipts may be read");
+          const visible = new Set(readable.map((entry) => entry.runId));
+          const selected = runIds.filter((id) => visible.has(id));
+          const prepared = await prepareSubagentRunsSnapshotForRunIds(subagentRuns, selected);
+          signal?.throwIfAborted();
+          const projection = prepared.consume((snapshot) => {
+            const current = new Set(readCurrentScope().readable.map((entry) => entry.runId));
+            const receipts = selected.flatMap((id) => {
+              const entry = snapshot.get(id);
+              return entry && current.has(id) ? [projectSubagentResultDelivery(entry)] : [];
+            });
+            const returned = new Set(receipts.map((receipt) => receipt.runId));
+            return { receipts, unavailable: runIds.filter((id) => !returned.has(id)) };
+          });
+          if (!projection.ready)
+            throw new Error("Subagent receipt read changed during preparation; retry the read");
+          return jsonResult({ status: "ok", action, ...projection.value });
+        }
         if (action === "list") {
           const readContext = await buildControlledSubagentRunsReadContext(
             controller.controllerSessionKey,

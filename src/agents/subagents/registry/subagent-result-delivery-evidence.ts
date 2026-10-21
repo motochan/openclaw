@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { SubagentAnnounceDeliveryResult } from "../announce/subagent-announce-dispatch.js";
@@ -139,4 +140,63 @@ export function retainSubagentResultDelivery(
   }
   entry.delivery.resultDelivery = next;
   return true;
+}
+
+/** Bounded metadata-only view for the native list owner, after its scope check. */
+export function projectSubagentResultDelivery(entry: SubagentRunRecord) {
+  const base = {
+    runId: entry.runId,
+    childSessionKey: entry.childSessionKey,
+    requesterSessionKey: entry.requesterSessionKey,
+    ownerGeneration: entry.generation ?? 0,
+    ownerCreatedAtMs: entry.createdAt,
+    ownerRef: createHash("sha256").update(getSubagentRunIdentity(entry)).digest("hex"),
+    deliveryGeneration: entry.delivery?.generation ?? 0,
+  };
+  const evidence = normalizeSubagentResultDelivery(entry, entry.delivery?.resultDelivery);
+  if (!evidence)
+    return {
+      ...base,
+      status: "UNKNOWN",
+      reportDelivery: "UNKNOWN",
+      reason: "no_valid_committed_receipt",
+    };
+  if (
+    evidence.acceptedParts.length > 128 ||
+    evidence.acceptedParts.some(
+      (part) =>
+        part.platformMessageId.length > 32 ||
+        [part.acceptance.accountId, part.acceptance.to, part.acceptance.threadId ?? ""].some(
+          (value) => typeof value !== "string" || value.length > 256,
+        ),
+    )
+  ) {
+    return {
+      ...base,
+      status: "UNKNOWN",
+      reportDelivery: "UNKNOWN",
+      reason: "receipt_export_limit",
+    };
+  }
+  const first = evidence.acceptedParts[0].acceptance;
+  const complete = evidence.completeReceipt;
+  return {
+    ...base,
+    source: "committed-subagent-delivery",
+    status: complete ? "complete" : "partial",
+    reportDelivery: complete ? "ACCEPTED_COMPLETE" : "UNKNOWN",
+    channel: first.channel,
+    accountId: first.accountId,
+    to: first.to,
+    threadId: first.threadId,
+    platformMessageIds: evidence.acceptedParts.map((part) => part.platformMessageId),
+    acceptedAtMs: Math.max(...evidence.acceptedParts.map((part) => part.acceptance.acceptedAtMs)),
+    parts: evidence.acceptedParts.map((part) => ({
+      platformMessageId: part.platformMessageId,
+      acceptedAtMs: part.acceptance.acceptedAtMs,
+    })),
+    ...(complete
+      ? { resultHash: complete.result.resultHash, utf8ByteLength: complete.result.utf8ByteLength }
+      : {}),
+  };
 }

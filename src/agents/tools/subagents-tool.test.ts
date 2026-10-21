@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createSubagentRunRecord } from "../subagent-test-fixtures.test-helpers.js";
+import * as registryState from "../subagents/registry/subagent-registry-state.js";
 import type { SubagentRunRecord } from "../subagents/registry/subagent-registry.types.js";
+import { getSubagentRunIdentity } from "../subagents/registry/subagent-run-generation.js";
 import { createSubagentsTool } from "./subagents-tool.js";
 const owner = vi.hoisted(() => ({
   runs: [] as SubagentRunRecord[],
@@ -171,5 +173,144 @@ describe("subagents native run contract", () => {
     await expect(
       tool().execute("cancel", { action: "cancel", runId: entry.runId }),
     ).rejects.toThrow("cancellation owner changed");
+  });
+});
+
+function receiptRun(complete = true) {
+  const entry = run();
+  entry.requesterOrigin = { channel: "telegram", to: "123", accountId: "default" };
+  entry.delivery = { status: "delivered", generation: 3 };
+  const identity = getSubagentRunIdentity(entry);
+  const result = {
+    runId: entry.runId,
+    childSessionKey: entry.childSessionKey,
+    requesterSessionKey: entry.requesterSessionKey,
+    runIdentity: identity,
+    resultHash: "a".repeat(64),
+    utf8ByteLength: 10,
+  };
+  entry.delivery.resultDelivery = {
+    runIdentity: identity,
+    deliveryGeneration: 3,
+    acceptedParts: [
+      {
+        platformMessageId: "501",
+        acceptance: {
+          channel: "telegram",
+          accountId: "default",
+          to: "123",
+          threadId: null,
+          acceptedAtMs: 100,
+        },
+      },
+    ],
+    ...(complete
+      ? {
+          completeReceipt: {
+            result,
+            platformMessageIds: ["501"],
+            acceptedAtMs: 100,
+            scope: "complete",
+          },
+        }
+      : {}),
+  };
+  return entry;
+}
+
+describe("bounded committed native delivery receipt list", () => {
+  it("returns allowlisted complete metadata, not result bodies or private owner paths", async () => {
+    const entry = receiptRun();
+    Object.assign(entry.delivery!.resultDelivery!, {
+      text: "PRIVATE_RESULT_BODY",
+      secret: "PRIVATE_EXTRA_FIELD",
+    });
+    const result = await tool().execute("list", { action: "list", runIds: [entry.runId] });
+    expect(result.details).toMatchObject({
+      status: "ok",
+      unavailable: [],
+      receipts: [
+        {
+          runId: entry.runId,
+          childSessionKey: entry.childSessionKey,
+          ownerGeneration: 1,
+          deliveryGeneration: 3,
+          status: "complete",
+          reportDelivery: "ACCEPTED_COMPLETE",
+          resultHash: "a".repeat(64),
+          channel: "telegram",
+          accountId: "default",
+          to: "123",
+          threadId: null,
+          platformMessageIds: ["501"],
+          acceptedAtMs: 100,
+        },
+      ],
+    });
+    expect(JSON.stringify(result.details)).not.toMatch(
+      /PRIVATE_RESULT_BODY|PRIVATE_EXTRA_FIELD|runIdentity|requesterStorePath/,
+    );
+  });
+  it("retains positive partial evidence without claiming complete delivery", async () => {
+    const entry = receiptRun(false);
+    const result = await tool().execute("list", { action: "list", runIds: [entry.runId] });
+    expect(result.details).toMatchObject({
+      receipts: [{ status: "partial", reportDelivery: "UNKNOWN", platformMessageIds: ["501"] }],
+    });
+    expect(JSON.stringify(result.details)).not.toContain("resultHash");
+  });
+  it.each(["parent", "stale", "malformed", "account"] as const)(
+    "keeps %s evidence UNKNOWN",
+    async (mode) => {
+      const entry = receiptRun();
+      if (mode === "parent") delete entry.delivery!.resultDelivery;
+      if (mode === "stale") entry.generation = 2;
+      if (mode === "malformed") entry.delivery!.resultDelivery!.acceptedParts = [];
+      if (mode === "account") entry.requesterOrigin!.accountId = "other";
+      const result = await tool().execute("list", { action: "list", runIds: [entry.runId] });
+      expect(result.details).toMatchObject({
+        receipts: [{ status: "UNKNOWN", reportDelivery: "UNKNOWN" }],
+      });
+      expect(JSON.stringify(result.details)).not.toContain("platformMessageIds");
+    },
+  );
+  it("does not truncate a large receipt into a false complete report", async () => {
+    const entry = receiptRun(false);
+    const part = entry.delivery!.resultDelivery!.acceptedParts[0];
+    entry.delivery!.resultDelivery!.acceptedParts = Array.from({ length: 129 }, (_, index) => ({
+      ...part,
+      platformMessageId: String(index + 1),
+    }));
+    const result = await tool().execute("list", { action: "list", runIds: [entry.runId] });
+    expect(result.details).toMatchObject({
+      receipts: [{ status: "UNKNOWN", reason: "receipt_export_limit" }],
+    });
+  });
+  it("never exports an out-of-scope child", async () => {
+    const entry = receiptRun();
+    entry.requesterSessionKey = "agent:other:main";
+    const result = await tool().execute("list", { action: "list", runIds: [entry.runId] });
+    expect(result.details).toMatchObject({ receipts: [], unavailable: [entry.runId] });
+    expect(JSON.stringify(result.details)).not.toContain("501");
+  });
+  it("rechecks controller visibility after the worker read await", async () => {
+    const entry = receiptRun();
+    vi.spyOn(registryState, "prepareSubagentRunsSnapshotForRunIds").mockImplementationOnce(
+      async () => {
+        const snapshot = new Map([[entry.runId, entry]]);
+        owner.runs = [];
+        return { consume: (read) => ({ ready: true, value: read(snapshot) }) };
+      },
+    );
+    const result = await tool().execute("list", { action: "list", runIds: [entry.runId] });
+    expect(result.details).toMatchObject({ receipts: [], unavailable: [entry.runId] });
+  });
+  it("enforces the32run bound before receipt hydration", async () => {
+    await expect(
+      tool().execute("list", {
+        action: "list",
+        runIds: Array.from({ length: 33 }, (_, index) => String(index)),
+      }),
+    ).rejects.toThrow("At most 32");
   });
 });
