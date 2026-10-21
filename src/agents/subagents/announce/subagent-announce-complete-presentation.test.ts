@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { sendMessageTelegram } from "../../../../extensions/telegram/runtime-api.js";
 import { chunkText } from "../../../auto-reply/chunk.js";
+import type { MessageReceipt } from "../../../channels/message/types.js";
+import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import {
   initializeGlobalHookRunner,
   resetGlobalHookRunner,
@@ -8,6 +9,7 @@ import {
 import { addTestHook } from "../../../plugins/hooks.test-helpers.js";
 import { setActivePluginRegistry } from "../../../plugins/runtime.js";
 import { matchesTranscriptEvent } from "../../../sessions/transcript-visible-record.js";
+import { loadBundledPluginFacade } from "../../../test-utils/bundled-plugin-public-surface.js";
 import {
   createOutboundTestPlugin,
   createTestRegistry,
@@ -17,6 +19,35 @@ import { taskCompletionEvents } from "../../subagent-test-fixtures.test-helpers.
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import { deliverCompletionDirect } from "./subagent-announce-completion-delivery.js";
 import { readSubagentRunAnnounceResultUsing } from "./subagent-announce-result.js";
+
+// Exercise the real public plugin artifact without making its source graph a
+// core compiler dependency. Keep the same fixture-side contract as the public send.
+type TelegramDelivery = { messageId: string; chatId: string; receipt?: MessageReceipt };
+type TelegramSendFixtureOptions = {
+  cfg: OpenClawConfig;
+  accountId: string;
+  textMode: "html";
+  api: {
+    sendMessage: (
+      chatId: string | number,
+      text: string,
+    ) => Promise<{
+      message_id: number;
+      date: number;
+      chat: { id: number; type: "private"; first_name: string };
+      text: string;
+      message_thread_id?: number;
+    }>;
+  };
+  onDeliveryResult: (delivery: TelegramDelivery) => Promise<void>;
+};
+const { sendMessageTelegram } = await loadBundledPluginFacade<{
+  sendMessageTelegram: (
+    to: string,
+    text: string,
+    options: TelegramSendFixtureOptions,
+  ) => Promise<TelegramDelivery>;
+}>({ pluginId: "telegram", artifactBasename: "runtime-api.js" });
 
 const text = "x".repeat(5_000) + "é尾";
 afterEach(() => {
