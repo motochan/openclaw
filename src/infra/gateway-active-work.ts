@@ -69,7 +69,7 @@ export function readGatewayMaintenanceWork(
   options: { strictCounts?: boolean } = {},
 ) {
   let inspectionValid = true;
-  const count = (value: number) => {
+  const inspectCount = (value: number) => {
     if (options.strictCounts && (!Number.isSafeInteger(value) || value < 0)) {
       inspectionValid = false;
     }
@@ -78,12 +78,12 @@ export function readGatewayMaintenanceWork(
   const resolved = { ...defaultInspectors, ...inspectors };
   const writeCustody: GatewayWriteCustody = readLifecycleWriteCustody();
   const counts = {
-    rootRequests: count(resolved.getRootRequests()),
-    cronRuns: count(resolved.getCronRuns()),
-    sessionMutations: count(resolved.getSessionMutations()),
-    terminalPersistence: count(resolved.getTerminalPersistence()),
+    rootRequests: inspectCount(resolved.getRootRequests()),
+    cronRuns: inspectCount(resolved.getCronRuns()),
+    sessionMutations: inspectCount(resolved.getSessionMutations()),
+    terminalPersistence: inspectCount(resolved.getTerminalPersistence()),
     lifecycleWrites: writeCustody.reduce(
-      (sum, fact) => sum + (options.strictCounts ? count(fact.count) : fact.count),
+      (sum, fact) => sum + (options.strictCounts ? inspectCount(fact.count) : fact.count),
       0,
     ),
   };
@@ -111,24 +111,24 @@ export function createGatewayActiveWorkSnapshot(
   };
   const maintenance = readGatewayMaintenanceWork(inspectors, options);
   let inspectionValid = maintenance.inspectionValid !== false;
-  const count = (value: number) => {
+  const inspectCount = (value: number) => {
     if (options.strictCounts && (!Number.isSafeInteger(value) || value < 0)) {
       inspectionValid = false;
     }
     return normalizeCount(value);
   };
   const counts = {
-    queueSize: count(resolved.getQueueSize()),
-    pendingReplies: count(resolved.getPendingReplies()),
-    embeddedRuns: count(resolved.getEmbeddedRuns()),
-    backgroundExecSessions: count(resolved.getBackgroundExecSessions()),
-    agentRuns: count(resolved.getAgentRuns()),
-    acpRuns: count(resolved.getAcpRuns()),
-    mediaRuns: count(resolved.getMediaRuns()),
-    sessionAdmissions: count(resolved.getSessionAdmissions()),
-    chatRuns: count(resolved.getChatRuns()),
-    queuedTurns: count(resolved.getQueuedTurns()),
-    terminalSessions: count(resolved.getTerminalSessions()),
+    queueSize: inspectCount(resolved.getQueueSize()),
+    pendingReplies: inspectCount(resolved.getPendingReplies()),
+    embeddedRuns: inspectCount(resolved.getEmbeddedRuns()),
+    backgroundExecSessions: inspectCount(resolved.getBackgroundExecSessions()),
+    agentRuns: inspectCount(resolved.getAgentRuns()),
+    acpRuns: inspectCount(resolved.getAcpRuns()),
+    mediaRuns: inspectCount(resolved.getMediaRuns()),
+    sessionAdmissions: inspectCount(resolved.getSessionAdmissions()),
+    chatRuns: inspectCount(resolved.getChatRuns()),
+    queuedTurns: inspectCount(resolved.getQueuedTurns()),
+    terminalSessions: inspectCount(resolved.getTerminalSessions()),
     ...maintenance.counts,
     /** Compatibility aggregate. Categories can overlap; use individual counts for diagnostics. */
     totalActive: 0,
