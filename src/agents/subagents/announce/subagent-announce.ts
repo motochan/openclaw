@@ -599,6 +599,7 @@ async function runSubagentAnnounceFlowBound(
       directOrigin,
       sourceSessionKey: params.childSessionKey,
       sourceRunId: params.childRunId,
+      preparedResult: ownResult,
       sourceTool: "subagent_announce",
       isSourceSessionEffectsAllowed: completionDeliveryAllowed,
       isCompletionOwnedByRequesterYield: params.isCompletionOwnedByRequesterYield,

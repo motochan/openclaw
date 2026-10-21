@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { asOptionalObjectRecord, isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { sanitizePendingFinalDeliveryText } from "../../../auto-reply/reply/pending-final-delivery-state.js";
@@ -47,6 +48,10 @@ import {
 } from "./subagent-announce-dispatch.js";
 import type { SubagentCompletionToolHandoffRegistration } from "./subagent-announce-handoff.js";
 import { inferDeliveryTargetChatType } from "./subagent-announce-origin.js";
+import type {
+  PreparedAnnounceResult,
+  PreparedCompleteSubagentResult,
+} from "./subagent-announce-result.js";
 import { dispatchGatewayMethodInProcess } from "./subagent-announce.runtime.js";
 
 export async function runAnnounceAgentCall(params: {
@@ -279,17 +284,36 @@ export function isDirectMessageDeliveryTarget(
   return deriveSessionChatTypeFromKey(requesterSessionKey) === "direct";
 }
 
-type DirectCompletionContent = { content: string; mediaUrls: string[]; audioAsVoice?: boolean };
+type DirectCompletionContent = {
+  content: string;
+  mediaUrls: string[];
+  audioAsVoice?: boolean;
+  completeResult?: PreparedCompleteSubagentResult;
+};
+
+function matchesCompleteResultText(text: string, result: PreparedCompleteSubagentResult): boolean {
+  return (
+    Buffer.byteLength(text, "utf8") === result.utf8ByteLength &&
+    createHash("sha256").update(text, "utf8").digest("hex") === result.resultHash
+  );
+}
 
 function collectDirectCompletionContent(params: {
   agentResult?: { payloads?: unknown };
   events: readonly AgentInternalEvent[] | undefined;
   contentKind: "completed_result" | "failed_notice";
+  preparedResult?: PreparedAnnounceResult;
+  sourceRunId?: string;
+  sourceSessionKey?: string;
+  requesterSessionKey: string;
 }): DirectCompletionContent | undefined {
   if (params.contentKind === "failed_notice") {
     return { content: FAILED_COMPLETION_NOTICE, mediaUrls: [] };
   }
-  const collect = (payloads: readonly unknown[]): DirectCompletionContent | undefined => {
+  const collect = (
+    payloads: readonly unknown[],
+    fullText = false,
+  ): DirectCompletionContent | undefined => {
     const textParts: string[] = [];
     const mediaUrls = new Set<string>();
     let audioAsVoice = false;
@@ -318,7 +342,8 @@ function collectDirectCompletionContent(params: {
       if (parsed.audioAsVoice === true || record.audioAsVoice === true) {
         audioAsVoice = true;
       }
-      const text = sanitizeAgentRunTerminalReplyText(sanitizePendingFinalDeliveryText(parsed.text));
+      const safeText = sanitizePendingFinalDeliveryText(parsed.text);
+      const text = fullText ? safeText : sanitizeAgentRunTerminalReplyText(safeText);
       // A result that only reads like the producer's placeholder is still a real
       // result: absence is recorded on the event fact, never matched here.
       if (text) {
@@ -356,7 +381,22 @@ function collectDirectCompletionContent(params: {
     if (!hasVisibleCompletionResult(event)) {
       continue;
     }
-    const parsedEvent = collect([{ text: event.result }]);
+    const prepared = params.preparedResult;
+    const identity = prepared?.completeResult;
+    const exactResult =
+      identity &&
+      prepared?.isCurrent() &&
+      identity.runId === params.sourceRunId &&
+      identity.childSessionKey === params.sourceSessionKey &&
+      identity.childSessionKey === event.childSessionKey &&
+      identity.requesterSessionKey === params.requesterSessionKey &&
+      prepared.text === event.result &&
+      matchesCompleteResultText(event.result, identity)
+        ? identity
+        : undefined;
+    // Only exact retained owner text bypasses the bounded lifecycle excerpt.
+    // All safety sanitation and ordinary outbound splitting remain in force.
+    const parsedEvent = collect([{ text: event.result }], exactResult !== undefined);
     const eventMediaUrls = collectAgentInternalEventMedia([event]).mediaUrls;
     const mediaUrls = new Set([...(parsedEvent?.mediaUrls ?? []), ...eventMediaUrls]);
     if (parsedEvent || mediaUrls.size > 0) {
@@ -364,6 +404,13 @@ function collectDirectCompletionContent(params: {
         content: parsedEvent?.content ?? "",
         mediaUrls: [...mediaUrls],
         ...(parsedEvent?.audioAsVoice ? { audioAsVoice: true as const } : {}),
+        ...(exactResult &&
+        parsedEvent &&
+        mediaUrls.size === 0 &&
+        !parsedEvent.audioAsVoice &&
+        matchesCompleteResultText(parsedEvent.content, exactResult)
+          ? { completeResult: exactResult }
+          : {}),
       };
     }
   }
@@ -383,6 +430,10 @@ export async function deliverCompletionDirect(params: {
     threadId?: string;
   };
   internalEvents?: readonly AgentInternalEvent[];
+  /** Private retained-result owner; never reconstructed from a prompt or receipt export. */
+  preparedResult?: PreparedAnnounceResult;
+  sourceRunId?: string;
+  sourceSessionKey?: string;
   contentKind: "completed_result" | "failed_notice";
   signal?: AbortSignal;
   agentResult?: { payloads?: unknown };
@@ -393,6 +444,12 @@ export async function deliverCompletionDirect(params: {
     agentResult: params.agentResult,
     events: params.internalEvents,
     contentKind: params.contentKind,
+    // Other transports retain their existing bounded behavior and UNKNOWN membership.
+    preparedResult:
+      params.deliveryTarget.channel === "telegram" ? params.preparedResult : undefined,
+    sourceRunId: params.sourceRunId,
+    sourceSessionKey: params.sourceSessionKey,
+    requesterSessionKey: params.requesterSessionKey,
   });
   // A failed completion must not deliver partial child media as its result.
   const content = completionContent?.content;
@@ -418,14 +475,17 @@ export async function deliverCompletionDirect(params: {
   const idempotencyKey = `${params.directIdempotencyKey}:text-direct`;
   let committedDelivery: SubagentAnnounceDeliveryResult | undefined;
   let deliveryResultReported: Promise<void> | undefined;
+  const isCurrent = () =>
+    params.isSourceSessionEffectsAllowed?.() !== false &&
+    (params.preparedResult?.isCurrent() ?? true);
   const assertDeliveryCurrent = () => {
     params.signal?.throwIfAborted();
-    if (params.isSourceSessionEffectsAllowed?.() === false) {
+    if (!isCurrent()) {
       throw new SourceOwnerChangedError();
     }
   };
   try {
-    if (params.isSourceSessionEffectsAllowed?.() === false) {
+    if (!isCurrent()) {
       return sourceOwnerChangedResult();
     }
     if (params.signal?.aborted) {
@@ -448,13 +508,29 @@ export async function deliverCompletionDirect(params: {
       abortSignal: params.signal,
       onPlatformSendDispatch: async () => assertDeliveryCurrent(),
       assertDirectAdapterHandoff: assertDeliveryCurrent,
-      onDeliveredPayload: () => {
+      onDeliveredPayload: (payload) => {
         if (committedDelivery) {
           return;
         }
         // This single payload must finish every chunk and attachment before settling,
         // still ahead of potentially blocked transcript mirroring.
-        committedDelivery = { delivered: true, path: "direct", deliveredAt: Date.now() };
+        const identity = completionContent?.completeResult;
+        const completePresentation =
+          identity &&
+          isCurrent() &&
+          payload.mediaUrls.length === 0 &&
+          !payload.audioAsVoice &&
+          !payload.presentation &&
+          !payload.interactive &&
+          !payload.location &&
+          matchesCompleteResultText(payload.text, identity);
+        committedDelivery = {
+          delivered: true,
+          path: "direct",
+          deliveredAt: Date.now(),
+          // Effective post-hook payload membership only, NOT a physical receipt.
+          ...(completePresentation ? { completeResultPresentation: identity } : {}),
+        };
         deliveryResultReported = Promise.resolve(
           params.onDeliveryResult?.(committedDelivery),
         ).catch(() => {

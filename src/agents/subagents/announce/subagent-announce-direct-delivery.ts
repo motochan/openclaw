@@ -73,6 +73,7 @@ import {
   resolveCompletionDeliveryOrigins,
   type DeliveryContext,
 } from "./subagent-announce-origin.js";
+import type { PreparedAnnounceResult } from "./subagent-announce-result.js";
 import { resolveRequesterStoreKey } from "./subagent-requester-store-key.js";
 
 export type SubagentAnnounceDirectParams = {
@@ -92,6 +93,8 @@ export type SubagentAnnounceDirectParams = {
   directOrigin?: DeliveryContext;
   requesterSessionOrigin?: DeliveryContext;
   sourceSessionKey?: string;
+  sourceRunId?: string;
+  preparedResult?: PreparedAnnounceResult;
   sourceTool?: string;
   settleWakeSourceSessionKeys?: readonly string[];
   isSourceSessionEffectsAllowed?: () => boolean;
@@ -290,6 +293,9 @@ export async function sendSubagentAnnounceDirectly(
         directIdempotencyKey: params.directIdempotencyKey,
         deliveryTarget,
         internalEvents: params.internalEvents,
+        preparedResult: params.preparedResult,
+        sourceRunId: params.sourceRunId,
+        sourceSessionKey: params.sourceSessionKey,
         contentKind,
         agentResult,
         signal: params.signal,

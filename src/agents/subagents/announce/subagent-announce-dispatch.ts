@@ -1,3 +1,5 @@
+import type { PreparedCompleteSubagentResult } from "./subagent-announce-result.js";
+
 type SubagentDeliveryPath = "steered" | "direct" | "queued" | "none";
 type SubagentAnnounceDeliveryDisposition =
   | "delivered"
@@ -27,6 +29,8 @@ export type SubagentAnnounceDeliveryResult = {
   path: SubagentDeliveryPath;
   deliveredAt?: number;
   enqueuedAt?: number;
+  /** Complete effective payload membership only; absent is UNKNOWN, never a channel receipt. */
+  completeResultPresentation?: PreparedCompleteSubagentResult;
   /** Direct delivery that already committed the requester's visible final. */
   requesterVisibleFinalDelivered?: true;
   storeReplaced?: true;
