@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createSubagentRunRecord } from "../subagent-test-fixtures.test-helpers.js";
+import type { SubagentResultDeliveryEvidence } from "../subagents/registry/subagent-registry-read.types.js";
 import * as registryState from "../subagents/registry/subagent-registry-state.js";
 import type { SubagentRunRecord } from "../subagents/registry/subagent-registry.types.js";
 import { getSubagentRunIdentity } from "../subagents/registry/subagent-run-generation.js";
@@ -189,21 +190,22 @@ function receiptRun(complete = true) {
     resultHash: "a".repeat(64),
     utf8ByteLength: 10,
   };
+  const completeReceiptParts = [
+    {
+      platformMessageId: "501",
+      acceptance: {
+        channel: "telegram",
+        accountId: "default",
+        to: "123",
+        threadId: null,
+        acceptedAtMs: 100,
+      },
+    },
+  ] satisfies SubagentResultDeliveryEvidence["acceptedParts"];
   entry.delivery.resultDelivery = {
     runIdentity: identity,
     deliveryGeneration: 3,
-    acceptedParts: [
-      {
-        platformMessageId: "501",
-        acceptance: {
-          channel: "telegram",
-          accountId: "default",
-          to: "123",
-          threadId: null,
-          acceptedAtMs: 100,
-        },
-      },
-    ],
+    acceptedParts: completeReceiptParts,
     ...(complete
       ? {
           completeReceipt: {
@@ -284,8 +286,12 @@ describe("bounded committed native delivery receipt list", () => {
   );
   it("does not truncate a large receipt into a false complete report", async () => {
     const entry = receiptRun(false);
-    const part = entry.delivery!.resultDelivery!.acceptedParts[0];
-    entry.delivery!.resultDelivery!.acceptedParts = Array.from({ length: 129 }, (_, index) => ({
+    const evidence = entry.delivery?.resultDelivery;
+    const part = evidence?.acceptedParts[0];
+    if (!evidence || !part) {
+      throw new Error("Fixture requires an accepted physical part");
+    }
+    evidence.acceptedParts = Array.from({ length: 129 }, (_, index) => ({
       ...part,
       platformMessageId: String(index + 1),
     }));
