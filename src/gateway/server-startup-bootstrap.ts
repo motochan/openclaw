@@ -26,7 +26,7 @@ import {
 } from "../infra/diagnostic-events.js";
 import { isVitestRuntimeEnv, logAcceptedEnvOption } from "../infra/env.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { createGatewayActiveWorkSnapshot } from "../infra/gateway-active-work.js";
+import { readGatewayRestartPendingWork } from "../infra/gateway-active-work.js";
 import { prepareGatewayAgentCliShim } from "../infra/openclaw-cli-shim.js";
 import { readGatewayRestartHandoffSync } from "../infra/restart-handoff.js";
 import { setGatewayRestartPolicy, setPreRestartDeferralCheck } from "../infra/restart.js";
@@ -346,7 +346,7 @@ export async function prepareGatewayServerBootstrap(input: {
     : resolvedStartupAuthOverride;
   setDiagnosticsEnabledForProcess(isDiagnosticsEnabled(cfgAtStart));
   setGatewayRestartPolicy({ allowExternal: isRestartEnabled(cfgAtStart) });
-  setPreRestartDeferralCheck(() => createGatewayActiveWorkSnapshot().counts.totalActive);
+  setPreRestartDeferralCheck(readGatewayRestartPendingWork);
   const seededControlUiAllowedOrigins = controlUiSeed.seededAllowedOrigins
     ? cfgAtStart.gateway?.controlUi?.allowedOrigins
     : undefined;

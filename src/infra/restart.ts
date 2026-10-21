@@ -50,7 +50,8 @@ const monotonicNow = () => performance.now();
 let restartAuthorizedCount = 0;
 let restartAuthorizedUntil = 0;
 let externalRestartAllowed = false;
-let preRestartCheck: (() => number) | null = null;
+type RestartPendingWorkCheck = (options?: { strict?: boolean }) => number;
+let preRestartCheck: RestartPendingWorkCheck | null = null;
 let restartCycleToken = 0;
 let emittedRestartToken = 0;
 let consumedRestartToken = 0;
@@ -133,7 +134,7 @@ function armPendingRestartTimer(requestedDueAt: number, nowMs: number): void {
       const deferralTimeoutMs = resolveGatewayRestartDeferralTimeoutMs();
       deferGatewayRestartUntilIdle(
         {
-          getPendingCount: pendingCheck,
+          getPendingCount: abandonOnTimeout ? () => pendingCheck({ strict: true }) : pendingCheck,
           maxWaitMs: deferralTimeoutMs,
           abandonOnTimeout,
           reason: scheduledReason,
@@ -174,7 +175,7 @@ export function resetGatewayRestartStateForInProcessRestart(): void {
  * Register a callback that scheduleGatewayRestart checks before emitting SIGUSR2.
  * The callback should return the number of pending items (0 = safe to restart).
  */
-export function setPreRestartDeferralCheck(fn: () => number): void {
+export function setPreRestartDeferralCheck(fn: RestartPendingWorkCheck): void {
   preRestartCheck = fn;
 }
 
@@ -398,7 +399,10 @@ async function emitPreparedGatewayRestartUnderAdmission(
   scheduledRequest?: PendingGatewayRestart,
 ): Promise<GatewayRestartEmitResult | null> {
   const hooks = caller?.hooks;
-  const isCurrent = () => transientGeneration === restartTransientGeneration && canEmit();
+  const isCurrent = () =>
+    transientGeneration === restartTransientGeneration &&
+    (!scheduledRequest || pendingRestartRequest === scheduledRequest) &&
+    canEmit();
   if (!isCurrent()) {
     return null;
   }
@@ -434,7 +438,7 @@ async function emitPreparedGatewayRestartUnderAdmission(
   // different-session coalesces during preparation still hit the #86742 guard.
   // Timing note: with an empty slot this stays await-free; mid-flight intent
   // and deferral consumers observe hookless emission at original latency.
-  let nextParked = pendingRestartRequest?.takeEmitHooks();
+  let nextParked = isCurrent() ? pendingRestartRequest?.takeEmitHooks() : undefined;
   let preparedParked: GatewayRestartRequest | undefined;
   const rejectCallerOnBail = async () => {
     if (hooks && callerPrepared) {
@@ -464,7 +468,7 @@ async function emitPreparedGatewayRestartUnderAdmission(
           restartLog.warn(`restart preparation failed: ${String(err)}`);
         }
       }
-      nextParked = pendingRestartRequest?.takeEmitHooks();
+      nextParked = isCurrent() ? pendingRestartRequest?.takeEmitHooks() : undefined;
       continue;
     }
     if (preparedParked && !preparedParked.isCurrent()) {
@@ -477,7 +481,7 @@ async function emitPreparedGatewayRestartUnderAdmission(
       break;
     }
     // Cleanup can admit another coalesced requester; drain that slot before emission too.
-    nextParked = pendingRestartRequest?.takeEmitHooks();
+    nextParked = isCurrent() ? pendingRestartRequest?.takeEmitHooks() : undefined;
   }
 
   // Non-emitted outcomes roll back every successfully prepared acknowledgement.
@@ -498,6 +502,10 @@ async function emitPreparedGatewayRestartUnderAdmission(
   // Slot settled and no awaits remain before emission — release ownership for
   // every emission attempt, not only hookless ones, so a later session can
   // claim continuation hooks for the next restart cycle.
+  if (!isCurrent()) {
+    await rejectPreparedRestartHooks(preparedHooksList);
+    return null;
+  }
   if (pendingRestartRequest) {
     pendingRestartRequest.sessionKey = undefined;
   }

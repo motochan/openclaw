@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
+import { registerDispatcher } from "../auto-reply/reply/dispatcher-registry.js";
 import {
   getActiveGatewayRootWorkCount,
   isGatewayWorkAdmissionClosed,
@@ -7,6 +8,10 @@ import {
   tryBeginGatewayRootWorkAdmission,
   tryBeginGatewaySuspendAdmission,
 } from "../process/gateway-work-admission.js";
+import {
+  createGatewayActiveWorkSnapshot,
+  readGatewayRestartPendingWork,
+} from "./gateway-active-work.js";
 import {
   consumeGatewayRestartAuthorization,
   consumeGatewayRestartIntent,
@@ -581,5 +586,77 @@ describe("fail-closed maintenance restart", () => {
     expect(() => scheduleGatewayRestart({ abandonOnTimeout: !first })).toThrow(
       "different maintenance policy",
     );
+  });
+});
+
+describe("reviewed maintenance ownership boundaries", () => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 0.5])(
+    "preserves invalid dispatcher inspection through the actual startup callback (%s)",
+    async (invalid) => {
+      const removeBusy = registerDispatcher(() => 1);
+      const removeInvalid = registerDispatcher(() => invalid);
+      try {
+        const legacy = createGatewayActiveWorkSnapshot();
+        const raw = 1 + invalid;
+        expect(legacy.counts.pendingReplies).toBe(
+          Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0,
+        );
+        expect(legacy).not.toHaveProperty("inspectionValid");
+        expect(readGatewayRestartPendingWork()).toBe(legacy.counts.totalActive);
+        expect(createGatewayActiveWorkSnapshot({}, { strictCounts: true }).inspectionValid).toBe(
+          false,
+        );
+        expect(Number.isNaN(readGatewayRestartPendingWork({ strict: true }))).toBe(true);
+        // This exact exported callback is installed by Gateway startup, not a mock count.
+        setPreRestartDeferralCheck(readGatewayRestartPendingWork);
+        scheduleGatewayRestart({ delayMs: 0, abandonOnTimeout: true });
+        await vi.advanceTimersByTimeAsync(300_000);
+        expect(restartSignalHandler).not.toHaveBeenCalled();
+        expect(isGatewayWorkAdmissionClosed()).toBe(false);
+      } finally {
+        removeBusy();
+        removeInvalid();
+      }
+    },
+  );
+
+  it("does not let a retired preparation consume its successor's accepted hooks", async () => {
+    const first = createDeferred();
+    const firstPrepared = vi.fn(async () => await first.promise);
+    const firstRejected = vi.fn(async () => {});
+    const firstEmitted = vi.fn(() => ({ status: "emitted" as const }));
+    const secondPrepared = vi.fn(async () => {});
+    const secondEmitted = vi.fn(() => ({ status: "emitted" as const }));
+    scheduleGatewayRestart({
+      delayMs: 0,
+      abandonOnTimeout: true,
+      sessionKey: "review-owner-a",
+      emitHooks: {
+        beforeEmit: firstPrepared,
+        afterEmitRejected: firstRejected,
+        emitRestart: firstEmitted,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firstPrepared).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(isGatewayWorkAdmissionClosed()).toBe(false);
+    const accepted = scheduleGatewayRestart({
+      delayMs: 1_000,
+      abandonOnTimeout: true,
+      sessionKey: "review-owner-b",
+      emitHooks: { beforeEmit: secondPrepared, emitRestart: secondEmitted },
+    });
+    expect(accepted.emitHooksQueued).toBe(true);
+    first.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(secondPrepared).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(firstPrepared).toHaveBeenCalledOnce();
+    expect(firstRejected).toHaveBeenCalledOnce();
+    expect(firstEmitted).not.toHaveBeenCalled();
+    expect(secondPrepared).toHaveBeenCalledOnce();
+    expect(secondEmitted).toHaveBeenCalledOnce();
+    expect(restartSignalHandler).not.toHaveBeenCalled();
   });
 });

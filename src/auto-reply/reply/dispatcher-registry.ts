@@ -26,10 +26,14 @@ export function registerDispatcher(pending: () => number): () => void {
   };
 }
 
-export function getTotalPendingReplies(): number {
+export function getTotalPendingReplies(options: { strict?: boolean } = {}): number {
   let total = 0;
   for (const dispatcher of activeDispatchers) {
-    total += dispatcher.pending();
+    const pending = dispatcher.pending();
+    if (options.strict && (!Number.isSafeInteger(pending) || pending < 0)) {
+      return Number.NaN;
+    }
+    total += pending;
   }
   return total;
 }

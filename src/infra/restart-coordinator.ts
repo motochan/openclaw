@@ -40,16 +40,22 @@ export type SafeGatewayRestartRequestResult = {
   restart: ScheduledRestart;
 };
 
-export function createSafeGatewayRestartPreflight(inspectors: Partial<SafeRestartInspectors> = {}) {
-  const snapshot = createGatewayActiveWorkSnapshot({
-    ...inspectors,
-    getSessionAdmissions: () => 0,
-    getSessionMutations: () => 0,
-    getChatRuns: () => 0,
-    getQueuedTurns: () => 0,
-    getTerminalPersistence: () => 0,
-    getTerminalSessions: () => 0,
-  });
+export function createSafeGatewayRestartPreflight(
+  inspectors: Partial<SafeRestartInspectors> = {},
+  options: { strictCounts?: boolean } = {},
+) {
+  const snapshot = createGatewayActiveWorkSnapshot(
+    {
+      ...inspectors,
+      getSessionAdmissions: () => 0,
+      getSessionMutations: () => 0,
+      getChatRuns: () => 0,
+      getQueuedTurns: () => 0,
+      getTerminalPersistence: () => 0,
+      getTerminalSessions: () => 0,
+    },
+    options,
+  );
   const counts = {
     queueSize: snapshot.counts.queueSize,
     pendingReplies: snapshot.counts.pendingReplies,
@@ -65,11 +71,13 @@ export function createSafeGatewayRestartPreflight(inspectors: Partial<SafeRestar
   const blockers = snapshot.blockers as SafeGatewayRestartBlocker[];
 
   const summary =
-    blockers.length === 0
-      ? "safe to restart now"
-      : `restart deferred: ${blockers.map((blocker) => blocker.message).join("; ")}`;
+    snapshot.inspectionValid === false
+      ? "restart deferred: active-work inspection invalid"
+      : blockers.length === 0
+        ? "safe to restart now"
+        : `restart deferred: ${blockers.map((blocker) => blocker.message).join("; ")}`;
   return {
-    safe: totalActive === 0,
+    safe: totalActive === 0 && snapshot.inspectionValid !== false,
     counts: { ...counts, totalActive },
     blockers,
     summary,
@@ -86,7 +94,9 @@ export function scheduleSafeGatewayRestart(
     inspect?: Partial<SafeRestartInspectors>;
   } = {},
 ): SafeGatewayRestartRequestResult {
-  const preflight = createSafeGatewayRestartPreflight(opts.inspect);
+  const preflight = createSafeGatewayRestartPreflight(opts.inspect, {
+    strictCounts: opts.abandonOnTimeout,
+  });
   const skipDeferral = opts.skipDeferral === true;
   const restart = scheduleGatewayRestart({
     delayMs: opts.delayMs ?? 0,
