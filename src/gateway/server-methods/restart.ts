@@ -61,6 +61,15 @@ export const restartHandlers: GatewayRequestHandlers = {
       rejectRestartRequest(respond, "invalid gateway.restart.request params");
       return;
     }
+    if (
+      params.abandonOnTimeout !== undefined &&
+      (typeof params.abandonOnTimeout !== "boolean" ||
+        (params.abandonOnTimeout &&
+          (params.skipDeferral === true || (params.target !== undefined && params.safe !== true))))
+    ) {
+      rejectRestartRequest(respond, "invalid maintenance restart policy");
+      return;
+    }
     const reason = normalizeReason(params.reason);
     const target = parseTargetedGatewayRestart(params.target);
     if (target === null) {
@@ -111,6 +120,7 @@ export const restartHandlers: GatewayRequestHandlers = {
       reason,
       delayMs: 0,
       skipDeferral: params.skipDeferral === true,
+      ...(params.abandonOnTimeout === true ? { abandonOnTimeout: true } : {}),
     });
     respond(true, result);
   },

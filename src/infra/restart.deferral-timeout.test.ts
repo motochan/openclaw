@@ -492,3 +492,94 @@ describe("restart control-flow deadlines use the monotonic clock", () => {
     expect(second.delayMs).toBe(30_000);
   });
 });
+
+describe("fail-closed maintenance restart", () => {
+  it.each(["busy", "unknown", "invalid"] as const)(
+    "abandons %s inspection at deadline and releases the scheduled owner",
+    async (state) => {
+      setPreRestartDeferralCheck(() => {
+        if (state === "unknown") {
+          throw new Error("inspection unavailable");
+        }
+        return state === "busy" ? 1 : Number.NaN;
+      });
+      scheduleGatewayRestart({ delayMs: 0, abandonOnTimeout: true });
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(restartSignalHandler).not.toHaveBeenCalled();
+      expect(isGatewayWorkAdmissionClosed()).toBe(false);
+      setPreRestartDeferralCheck(() => 0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(restartSignalHandler).not.toHaveBeenCalled();
+      scheduleGatewayRestart({ delayMs: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(restartSignalHandler).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("uses the ordinary admission owner once idle before deadline", async () => {
+    let pending = 1;
+    setPreRestartDeferralCheck(() => pending);
+    scheduleGatewayRestart({ delayMs: 0, abandonOnTimeout: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(restartSignalHandler).not.toHaveBeenCalled();
+    pending = 0;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(restartSignalHandler).toHaveBeenCalledOnce();
+    expect(consumeGatewayRestartIntent()).toBeNull();
+  });
+
+  it.each(["busy", "unknown"] as const)(
+    "rechecks %s work after awaited acknowledgement under the signal fence",
+    async (state) => {
+      let pending = 0;
+      let unavailable = false;
+      const preparation = createDeferred();
+      const emitRestart = vi.fn(() => ({ status: "emitted" as const }));
+      const handle = deferGatewayRestartUntilIdle({
+        getPendingCount: () => {
+          if (unavailable) {
+            throw new Error("inspection unavailable");
+          }
+          return pending;
+        },
+        maxWaitMs: 100,
+        pollMs: 10,
+        abandonOnTimeout: true,
+        emitHooks: { beforeEmit: () => preparation.promise, emitRestart },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      pending = 1;
+      unavailable = state === "unknown";
+      preparation.resolve();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(emitRestart).not.toHaveBeenCalled();
+      expect(restartSignalHandler).not.toHaveBeenCalled();
+      expect(isGatewayWorkAdmissionClosed()).toBe(false);
+      handle.cancel();
+    },
+  );
+
+  it("abandons a still-preparing attempt without a late signal", async () => {
+    const preparation = createDeferred();
+    const emitRestart = vi.fn(() => ({ status: "emitted" as const }));
+    deferGatewayRestartUntilIdle({
+      getPendingCount: () => 0,
+      pollMs: 10,
+      maxWaitMs: 100,
+      abandonOnTimeout: true,
+      emitHooks: { beforeEmit: () => preparation.promise, emitRestart },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(isGatewayWorkAdmissionClosed()).toBe(false);
+    preparation.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emitRestart).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("refuses conflicting coalescing (maintenance first=%s)", (first) => {
+    scheduleGatewayRestart({ delayMs: 1_000, abandonOnTimeout: first });
+    expect(() => scheduleGatewayRestart({ abandonOnTimeout: !first })).toThrow(
+      "different maintenance policy",
+    );
+  });
+});

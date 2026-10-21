@@ -111,3 +111,31 @@ describe("runSafeGatewayRestart", () => {
     expect(runtimeError).toHaveBeenCalledWith(expect.stringContaining("external supervisor"));
   });
 });
+
+describe("maintenance restart RPC capability", () => {
+  it("requires fail-closed server support before sending the maintenance request", async () => {
+    callGatewayCli.mockReset().mockResolvedValueOnce({
+      status: "deferred",
+      preflight: { blockers: [], summary: "restart deferred" },
+      restart: { pid: 123 },
+    });
+    const { runSafeGatewayRestart } = await import("./lifecycle-safe-restart.js");
+    await runSafeGatewayRestart({ safe: true, abandonOnTimeout: true, json: true });
+    expect(callGatewayCli).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "gateway.restart.request",
+        params: { reason: "gateway.restart.safe", abandonOnTimeout: true },
+        requiredCapabilities: ["gateway-restart-abandon-on-timeout-v1"],
+      }),
+    );
+  });
+
+  it("rejects deferral bypass before calling the Gateway", async () => {
+    callGatewayCli.mockReset();
+    const { runSafeGatewayRestart } = await import("./lifecycle-safe-restart.js");
+    await expect(
+      runSafeGatewayRestart({ safe: true, abandonOnTimeout: true, skipDeferral: true }),
+    ).rejects.toThrow("cannot combine");
+    expect(callGatewayCli).not.toHaveBeenCalled();
+  });
+});

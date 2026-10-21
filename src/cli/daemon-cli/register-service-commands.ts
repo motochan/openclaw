@@ -180,6 +180,11 @@ export function addGatewayServiceCommands(parent: Command, opts?: { statusDescri
       false,
     )
     .option(
+      "--abandon-on-timeout",
+      "Abandon rather than force when the safe restart idle deadline expires; requires --safe",
+      false,
+    )
+    .option(
       "--skip-deferral",
       "Bypass the safe-restart active-work deferral gate; close-stage reply drain still applies; requires --safe",
       false,
