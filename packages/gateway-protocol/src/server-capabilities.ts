@@ -3,6 +3,7 @@ export const GATEWAY_SERVER_CAPS = {
   BOARD_WIDGET_PUT_CANVAS_DOC: "board-widget-put-canvas-doc",
   CHAT_SEND_ROUTING_CONTRACT: "chat-send-routing-contract",
   CONTROL_UI_BROWSER_FOCUS: "control-ui-browser-focus",
+  GATEWAY_RESTART_ABANDON_ON_TIMEOUT: "gateway-restart-abandon-on-timeout-v1",
   GATEWAY_RESTART_TARGET_SAFE: "gateway-restart-target-safe-v1",
   LOCAL_STATE_OWNER_ROUTING: "local-state-owner-routing-v1",
   CHANNELS_PAIRING_LIST_OWNER: "channels-pairing-list-owner-v1",

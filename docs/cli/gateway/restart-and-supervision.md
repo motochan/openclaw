@@ -15,6 +15,7 @@ Restart flags, which install owns the host service, external supervisors, and pr
 ```bash
 openclaw gateway restart
 openclaw gateway restart --safe
+openclaw gateway restart --safe --abandon-on-timeout
 openclaw gateway restart --safe --skip-deferral
 openclaw gateway restart --force
 openclaw gateway restart --wait 30s
@@ -32,6 +33,8 @@ alone does not prove that the Gateway is serving. Reinstallation is not a remedy
 for an unresolved startup dependency or unknown process ownership.
 
 `--safe` asks the running Gateway to preflight active work and schedule one coalesced restart after that work drains. The wait is bounded to 5 minutes; when the budget expires the restart is forced. `--safe` cannot combine with `--force` or `--wait`.
+
+`--safe --abandon-on-timeout` is intended for unattended maintenance. It abandons the request at the five-minute idle deadline instead of forcing a restart, including when work inspection fails. The final idle check runs under the native admission fence after asynchronous preparation. It cannot combine with `--skip-deferral`. Requests with conflicting maintenance policies cannot coalesce. The CLI acknowledges scheduling, not successor health; observe Gateway logs for abandonment and verify successor readiness separately. Existing `--safe` behavior is unchanged.
 
 `--skip-deferral` bypasses only the safe-restart active-work deferral gate. It can move the Gateway into shutdown even while active-work blockers are reported, but the close-stage pending-reply drain still applies before the process exits. It requires `--safe` — use it when a deferral is stuck on a runaway task and reply delivery can still be allowed to settle.
 

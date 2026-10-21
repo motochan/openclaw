@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
+import { registerDispatcher } from "../auto-reply/reply/dispatcher-registry.js";
 import {
   getActiveGatewayRootWorkCount,
   isGatewayWorkAdmissionClosed,
@@ -7,6 +8,10 @@ import {
   tryBeginGatewayRootWorkAdmission,
   tryBeginGatewaySuspendAdmission,
 } from "../process/gateway-work-admission.js";
+import {
+  createGatewayActiveWorkSnapshot,
+  readGatewayRestartPendingWork,
+} from "./gateway-active-work.js";
 import {
   consumeGatewayRestartAuthorization,
   consumeGatewayRestartIntent,
@@ -490,5 +495,168 @@ describe("restart control-flow deadlines use the monotonic clock", () => {
     const second = scheduleGatewayRestart({ delayMs: 0, reason: "second" });
     expect(second.cooldownMsApplied).toBe(30_000);
     expect(second.delayMs).toBe(30_000);
+  });
+});
+
+describe("fail-closed maintenance restart", () => {
+  it.each(["busy", "unknown", "invalid"] as const)(
+    "abandons %s inspection at deadline and releases the scheduled owner",
+    async (state) => {
+      setPreRestartDeferralCheck(() => {
+        if (state === "unknown") {
+          throw new Error("inspection unavailable");
+        }
+        return state === "busy" ? 1 : Number.NaN;
+      });
+      scheduleGatewayRestart({ delayMs: 0, abandonOnTimeout: true });
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(restartSignalHandler).not.toHaveBeenCalled();
+      expect(isGatewayWorkAdmissionClosed()).toBe(false);
+      setPreRestartDeferralCheck(() => 0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(restartSignalHandler).not.toHaveBeenCalled();
+      scheduleGatewayRestart({ delayMs: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(restartSignalHandler).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("uses the ordinary admission owner once idle before deadline", async () => {
+    let pending = 1;
+    setPreRestartDeferralCheck(() => pending);
+    scheduleGatewayRestart({ delayMs: 0, abandonOnTimeout: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(restartSignalHandler).not.toHaveBeenCalled();
+    pending = 0;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(restartSignalHandler).toHaveBeenCalledOnce();
+    expect(consumeGatewayRestartIntent()).toBeNull();
+  });
+
+  it.each(["busy", "unknown"] as const)(
+    "rechecks %s work after awaited acknowledgement under the signal fence",
+    async (state) => {
+      let pending = 0;
+      let unavailable = false;
+      const preparation = createDeferred();
+      const emitRestart = vi.fn(() => ({ status: "emitted" as const }));
+      const handle = deferGatewayRestartUntilIdle({
+        getPendingCount: () => {
+          if (unavailable) {
+            throw new Error("inspection unavailable");
+          }
+          return pending;
+        },
+        maxWaitMs: 100,
+        pollMs: 10,
+        abandonOnTimeout: true,
+        emitHooks: { beforeEmit: () => preparation.promise, emitRestart },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      pending = 1;
+      unavailable = state === "unknown";
+      preparation.resolve();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(emitRestart).not.toHaveBeenCalled();
+      expect(restartSignalHandler).not.toHaveBeenCalled();
+      expect(isGatewayWorkAdmissionClosed()).toBe(false);
+      handle.cancel();
+    },
+  );
+
+  it("abandons a still-preparing attempt without a late signal", async () => {
+    const preparation = createDeferred();
+    const emitRestart = vi.fn(() => ({ status: "emitted" as const }));
+    deferGatewayRestartUntilIdle({
+      getPendingCount: () => 0,
+      pollMs: 10,
+      maxWaitMs: 100,
+      abandonOnTimeout: true,
+      emitHooks: { beforeEmit: () => preparation.promise, emitRestart },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(isGatewayWorkAdmissionClosed()).toBe(false);
+    preparation.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(emitRestart).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("refuses conflicting coalescing (maintenance first=%s)", (first) => {
+    scheduleGatewayRestart({ delayMs: 1_000, abandonOnTimeout: first });
+    expect(() => scheduleGatewayRestart({ abandonOnTimeout: !first })).toThrow(
+      "different maintenance policy",
+    );
+  });
+});
+
+describe("reviewed maintenance ownership boundaries", () => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 0.5])(
+    "preserves invalid dispatcher inspection through the actual startup callback (%s)",
+    async (invalid) => {
+      const removeBusy = registerDispatcher(() => 1);
+      const removeInvalid = registerDispatcher(() => invalid);
+      try {
+        const legacy = createGatewayActiveWorkSnapshot();
+        const raw = 1 + invalid;
+        expect(legacy.counts.pendingReplies).toBe(
+          Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0,
+        );
+        expect(legacy).not.toHaveProperty("inspectionValid");
+        expect(readGatewayRestartPendingWork()).toBe(legacy.counts.totalActive);
+        expect(createGatewayActiveWorkSnapshot({}, { strictCounts: true }).inspectionValid).toBe(
+          false,
+        );
+        expect(Number.isNaN(readGatewayRestartPendingWork({ strict: true }))).toBe(true);
+        // This exact exported callback is installed by Gateway startup, not a mock count.
+        setPreRestartDeferralCheck(readGatewayRestartPendingWork);
+        scheduleGatewayRestart({ delayMs: 0, abandonOnTimeout: true });
+        await vi.advanceTimersByTimeAsync(300_000);
+        expect(restartSignalHandler).not.toHaveBeenCalled();
+        expect(isGatewayWorkAdmissionClosed()).toBe(false);
+      } finally {
+        removeBusy();
+        removeInvalid();
+      }
+    },
+  );
+
+  it("does not let a retired preparation consume its successor's accepted hooks", async () => {
+    const first = createDeferred();
+    const firstPrepared = vi.fn(async () => await first.promise);
+    const firstRejected = vi.fn(async () => {});
+    const firstEmitted = vi.fn(() => ({ status: "emitted" as const }));
+    const secondPrepared = vi.fn(async () => {});
+    const secondEmitted = vi.fn(() => ({ status: "emitted" as const }));
+    scheduleGatewayRestart({
+      delayMs: 0,
+      abandonOnTimeout: true,
+      sessionKey: "review-owner-a",
+      emitHooks: {
+        beforeEmit: firstPrepared,
+        afterEmitRejected: firstRejected,
+        emitRestart: firstEmitted,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firstPrepared).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(isGatewayWorkAdmissionClosed()).toBe(false);
+    const accepted = scheduleGatewayRestart({
+      delayMs: 1_000,
+      abandonOnTimeout: true,
+      sessionKey: "review-owner-b",
+      emitHooks: { beforeEmit: secondPrepared, emitRestart: secondEmitted },
+    });
+    expect(accepted.emitHooksQueued).toBe(true);
+    first.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(secondPrepared).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(firstPrepared).toHaveBeenCalledOnce();
+    expect(firstRejected).toHaveBeenCalledOnce();
+    expect(firstEmitted).not.toHaveBeenCalled();
+    expect(secondPrepared).toHaveBeenCalledOnce();
+    expect(secondEmitted).toHaveBeenCalledOnce();
+    expect(restartSignalHandler).not.toHaveBeenCalled();
   });
 });

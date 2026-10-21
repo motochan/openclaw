@@ -41,9 +41,13 @@ export async function runSafeGatewayRestart(
   if (opts.wait !== undefined) {
     throw new Error("--safe cannot be combined with --wait; safe restart uses gateway deferral");
   }
+  if (opts.abandonOnTimeout && opts.skipDeferral) {
+    throw new Error("--abandon-on-timeout cannot combine with --skip-deferral");
+  }
   const skipDeferral = opts.skipDeferral === true;
   const params = {
     reason: "gateway.restart.safe",
+    ...(opts.abandonOnTimeout ? { abandonOnTimeout: true as const } : {}),
     ...(target
       ? {
           safe: true as const,
@@ -82,8 +86,16 @@ export async function runSafeGatewayRestart(
       ? {
           ignoreEnvUrlOverride: true,
           localPortOverride: target.port,
-          requiredCapabilities: [GATEWAY_SERVER_CAPS.GATEWAY_RESTART_TARGET_SAFE],
+          requiredCapabilities: [
+            GATEWAY_SERVER_CAPS.GATEWAY_RESTART_TARGET_SAFE,
+            ...(opts.abandonOnTimeout
+              ? [GATEWAY_SERVER_CAPS.GATEWAY_RESTART_ABANDON_ON_TIMEOUT]
+              : []),
+          ],
         }
+      : {}),
+    ...(!target && opts.abandonOnTimeout
+      ? { requiredCapabilities: [GATEWAY_SERVER_CAPS.GATEWAY_RESTART_ABANDON_ON_TIMEOUT] }
       : {}),
     timeoutMs: 10_000,
   });
@@ -101,7 +113,9 @@ export async function runSafeGatewayRestart(
       ? "safe restart request joined an existing pending gateway restart"
       : result.status === "deferred"
         ? "safe restart requested; gateway will restart after active work drains " +
-          "(bounded wait; may force after the timeout expires)"
+          (opts.abandonOnTimeout
+            ? "(bounded wait; abandoned if the idle deadline expires)"
+            : "(bounded wait; may force after the timeout expires)")
         : skipDeferral
           ? "safe restart requested; gateway bypassing active-work deferral; " +
             "shutdown may still wait for pending replies to drain"

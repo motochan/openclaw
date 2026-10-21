@@ -64,15 +64,28 @@ function normalizeCount(value: number): number {
 }
 
 /** Cheap projection for status; suspension still uses the complete snapshot below. */
-export function readGatewayMaintenanceWork(inspectors: Partial<GatewayActiveWorkInspectors> = {}) {
+export function readGatewayMaintenanceWork(
+  inspectors: Partial<GatewayActiveWorkInspectors> = {},
+  options: { strictCounts?: boolean } = {},
+) {
+  let inspectionValid = true;
+  const inspectCount = (value: number) => {
+    if (options.strictCounts && (!Number.isSafeInteger(value) || value < 0)) {
+      inspectionValid = false;
+    }
+    return normalizeCount(value);
+  };
   const resolved = { ...defaultInspectors, ...inspectors };
   const writeCustody: GatewayWriteCustody = readLifecycleWriteCustody();
   const counts = {
-    rootRequests: normalizeCount(resolved.getRootRequests()),
-    cronRuns: normalizeCount(resolved.getCronRuns()),
-    sessionMutations: normalizeCount(resolved.getSessionMutations()),
-    terminalPersistence: normalizeCount(resolved.getTerminalPersistence()),
-    lifecycleWrites: writeCustody.reduce((sum, fact) => sum + fact.count, 0),
+    rootRequests: inspectCount(resolved.getRootRequests()),
+    cronRuns: inspectCount(resolved.getCronRuns()),
+    sessionMutations: inspectCount(resolved.getSessionMutations()),
+    terminalPersistence: inspectCount(resolved.getTerminalPersistence()),
+    lifecycleWrites: writeCustody.reduce(
+      (sum, fact) => sum + (options.strictCounts ? inspectCount(fact.count) : fact.count),
+      0,
+    ),
   };
   for (const [phase, count] of [
     ["session-mutation", counts.sessionMutations],
@@ -82,27 +95,40 @@ export function readGatewayMaintenanceWork(inspectors: Partial<GatewayActiveWork
       writeCustody.push({ phase, count });
     }
   }
-  return { counts, writeCustody };
+  return { counts, writeCustody, ...(options.strictCounts ? { inspectionValid } : {}) };
 }
 
 export function createGatewayActiveWorkSnapshot(
   inspectors: Partial<GatewayActiveWorkInspectors> = {},
-  options: { ignoreTerminalSessions?: boolean } = {},
+  options: { ignoreTerminalSessions?: boolean; strictCounts?: boolean } = {},
 ) {
-  const resolved = { ...defaultInspectors, ...inspectors };
-  const maintenance = readGatewayMaintenanceWork(inspectors);
+  const resolved = {
+    ...defaultInspectors,
+    ...(options.strictCounts
+      ? { getPendingReplies: () => getTotalPendingReplies({ strict: true }) }
+      : {}),
+    ...inspectors,
+  };
+  const maintenance = readGatewayMaintenanceWork(inspectors, options);
+  let inspectionValid = maintenance.inspectionValid !== false;
+  const inspectCount = (value: number) => {
+    if (options.strictCounts && (!Number.isSafeInteger(value) || value < 0)) {
+      inspectionValid = false;
+    }
+    return normalizeCount(value);
+  };
   const counts = {
-    queueSize: normalizeCount(resolved.getQueueSize()),
-    pendingReplies: normalizeCount(resolved.getPendingReplies()),
-    embeddedRuns: normalizeCount(resolved.getEmbeddedRuns()),
-    backgroundExecSessions: normalizeCount(resolved.getBackgroundExecSessions()),
-    agentRuns: normalizeCount(resolved.getAgentRuns()),
-    acpRuns: normalizeCount(resolved.getAcpRuns()),
-    mediaRuns: normalizeCount(resolved.getMediaRuns()),
-    sessionAdmissions: normalizeCount(resolved.getSessionAdmissions()),
-    chatRuns: normalizeCount(resolved.getChatRuns()),
-    queuedTurns: normalizeCount(resolved.getQueuedTurns()),
-    terminalSessions: normalizeCount(resolved.getTerminalSessions()),
+    queueSize: inspectCount(resolved.getQueueSize()),
+    pendingReplies: inspectCount(resolved.getPendingReplies()),
+    embeddedRuns: inspectCount(resolved.getEmbeddedRuns()),
+    backgroundExecSessions: inspectCount(resolved.getBackgroundExecSessions()),
+    agentRuns: inspectCount(resolved.getAgentRuns()),
+    acpRuns: inspectCount(resolved.getAcpRuns()),
+    mediaRuns: inspectCount(resolved.getMediaRuns()),
+    sessionAdmissions: inspectCount(resolved.getSessionAdmissions()),
+    chatRuns: inspectCount(resolved.getChatRuns()),
+    queuedTurns: inspectCount(resolved.getQueuedTurns()),
+    terminalSessions: inspectCount(resolved.getTerminalSessions()),
     ...maintenance.counts,
     /** Compatibility aggregate. Categories can overlap; use individual counts for diagnostics. */
     totalActive: 0,
@@ -175,11 +201,18 @@ export function createGatewayActiveWorkSnapshot(
   }
 
   return {
-    idle: counts.totalActive === 0,
+    idle: counts.totalActive === 0 && (!options.strictCounts || inspectionValid),
+    ...(options.strictCounts ? { inspectionValid } : {}),
     counts,
     blockers,
     writeCustody: maintenance.writeCustody,
   };
+}
+
+/** Shared startup callback: strict restart owners must retain invalid inspection facts. */
+export function readGatewayRestartPendingWork(options: { strict?: boolean } = {}): number {
+  const snapshot = createGatewayActiveWorkSnapshot({}, { strictCounts: options.strict });
+  return snapshot.inspectionValid === false ? Number.NaN : snapshot.counts.totalActive;
 }
 
 const GATEWAY_ACTIVE_WORK_POLL_MS = 250;

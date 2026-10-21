@@ -141,6 +141,34 @@ describe("gateway restart handlers", () => {
     resetGatewayWorkAdmission();
   });
 
+  it.each([
+    { abandonOnTimeout: "yes" },
+    { abandonOnTimeout: true, skipDeferral: true },
+    { abandonOnTimeout: true, target: restartTarget, safe: false },
+  ])("refuses invalid maintenance policy before scheduling: %j", async (params) => {
+    const respond = await invokeRestartRequest(params);
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        message: "invalid maintenance restart policy",
+      }),
+    );
+    expect(scheduleSafeGatewayRestart).not.toHaveBeenCalled();
+    expect(requestGatewayRestartWithSignalAdmission).not.toHaveBeenCalled();
+  });
+
+  it("forwards an explicit fail-closed policy to the existing owner", async () => {
+    mockScheduledRestart({ safe: false, summary: "restart deferred" });
+    await invokeRestartRequest({ reason: "maintenance", abandonOnTimeout: true });
+    expect(scheduleSafeGatewayRestart).toHaveBeenCalledWith({
+      reason: "maintenance",
+      delayMs: 0,
+      skipDeferral: false,
+      abandonOnTimeout: true,
+    });
+  });
+
   it("keeps the deprecated read-only preflight response shape", async () => {
     const preflight = {
       safe: false,

@@ -358,6 +358,9 @@ export async function runDaemonStop(opts: DaemonLifecycleOptions = {}) {
 
 /** Restart the Gateway service or a verified unmanaged listener, then prove health. */
 export async function runDaemonRestart(opts: DaemonLifecycleOptions = {}): Promise<boolean> {
+  if (opts.abandonOnTimeout && (!opts.safe || opts.skipDeferral)) {
+    throw new Error("--abandon-on-timeout requires --safe without --skip-deferral");
+  }
   let preserveDefinition = Boolean(opts.preserveDefinition);
   if (preserveDefinition) {
     assertGatewayServiceMutationAllowed("restart the gateway");

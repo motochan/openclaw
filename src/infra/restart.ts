@@ -50,7 +50,8 @@ const monotonicNow = () => performance.now();
 let restartAuthorizedCount = 0;
 let restartAuthorizedUntil = 0;
 let externalRestartAllowed = false;
-let preRestartCheck: (() => number) | null = null;
+type RestartPendingWorkCheck = (options?: { strict?: boolean }) => number;
+let preRestartCheck: RestartPendingWorkCheck | null = null;
 let restartCycleToken = 0;
 let emittedRestartToken = 0;
 let consumedRestartToken = 0;
@@ -66,6 +67,7 @@ let pendingRestartReason: string | undefined;
 let pendingRestartSuccessorOwner: GatewayRestartIntent["successorOwner"];
 let pendingRestartRequest: PendingGatewayRestart | undefined;
 let pendingRestartSkipDeferral = false;
+let pendingRestartAbandonOnTimeout = false;
 let pendingRestartPreparing = false;
 let pendingRestartSignalAdmission: GatewayRestartSignalAdmissionLease | null = null;
 let restartTransientGeneration = 0;
@@ -88,6 +90,7 @@ function clearPendingScheduledRestart(): void {
   pendingRestartSuccessorOwner = undefined;
   pendingRestartRequest = undefined;
   pendingRestartSkipDeferral = false;
+  pendingRestartAbandonOnTimeout = false;
   pendingRestartPreparing = false;
 }
 
@@ -109,6 +112,7 @@ function armPendingRestartTimer(requestedDueAt: number, nowMs: number): void {
     () => {
       const scheduledReason = pendingRestartReason;
       const scheduledSkipDeferral = pendingRestartSkipDeferral;
+      const abandonOnTimeout = pendingRestartAbandonOnTimeout;
       const request = pendingRestartRequest;
       pendingRestartTimer = null;
       pendingRestartDueAt = 0;
@@ -116,6 +120,11 @@ function armPendingRestartTimer(requestedDueAt: number, nowMs: number): void {
       pendingRestartSkipDeferral = false;
       pendingRestartPreparing = true;
       const pendingCheck = preRestartCheck;
+      if (abandonOnTimeout && !pendingCheck) {
+        restartLog.warn("maintenance restart abandoned: active-work inspection unavailable");
+        clearPendingScheduledRestart();
+        return;
+      }
       if (scheduledSkipDeferral || !pendingCheck) {
         void emitPreparedGatewayRestart(undefined, scheduledReason, undefined, {
           scheduledRequest: request,
@@ -125,8 +134,9 @@ function armPendingRestartTimer(requestedDueAt: number, nowMs: number): void {
       const deferralTimeoutMs = resolveGatewayRestartDeferralTimeoutMs();
       deferGatewayRestartUntilIdle(
         {
-          getPendingCount: pendingCheck,
+          getPendingCount: abandonOnTimeout ? () => pendingCheck({ strict: true }) : pendingCheck,
           maxWaitMs: deferralTimeoutMs,
+          abandonOnTimeout,
           reason: scheduledReason,
           timeoutIntent: { force: true, ...(scheduledReason ? { reason: scheduledReason } : {}) },
         },
@@ -165,7 +175,7 @@ export function resetGatewayRestartStateForInProcessRestart(): void {
  * Register a callback that scheduleGatewayRestart checks before emitting SIGUSR2.
  * The callback should return the number of pending items (0 = safe to restart).
  */
-export function setPreRestartDeferralCheck(fn: () => number): void {
+export function setPreRestartDeferralCheck(fn: RestartPendingWorkCheck): void {
   preRestartCheck = fn;
 }
 
@@ -389,7 +399,10 @@ async function emitPreparedGatewayRestartUnderAdmission(
   scheduledRequest?: PendingGatewayRestart,
 ): Promise<GatewayRestartEmitResult | null> {
   const hooks = caller?.hooks;
-  const isCurrent = () => transientGeneration === restartTransientGeneration && canEmit();
+  const isCurrent = () =>
+    transientGeneration === restartTransientGeneration &&
+    (!scheduledRequest || pendingRestartRequest === scheduledRequest) &&
+    canEmit();
   if (!isCurrent()) {
     return null;
   }
@@ -425,7 +438,7 @@ async function emitPreparedGatewayRestartUnderAdmission(
   // different-session coalesces during preparation still hit the #86742 guard.
   // Timing note: with an empty slot this stays await-free; mid-flight intent
   // and deferral consumers observe hookless emission at original latency.
-  let nextParked = pendingRestartRequest?.takeEmitHooks();
+  let nextParked = isCurrent() ? pendingRestartRequest?.takeEmitHooks() : undefined;
   let preparedParked: GatewayRestartRequest | undefined;
   const rejectCallerOnBail = async () => {
     if (hooks && callerPrepared) {
@@ -455,7 +468,7 @@ async function emitPreparedGatewayRestartUnderAdmission(
           restartLog.warn(`restart preparation failed: ${String(err)}`);
         }
       }
-      nextParked = pendingRestartRequest?.takeEmitHooks();
+      nextParked = isCurrent() ? pendingRestartRequest?.takeEmitHooks() : undefined;
       continue;
     }
     if (preparedParked && !preparedParked.isCurrent()) {
@@ -468,7 +481,7 @@ async function emitPreparedGatewayRestartUnderAdmission(
       break;
     }
     // Cleanup can admit another coalesced requester; drain that slot before emission too.
-    nextParked = pendingRestartRequest?.takeEmitHooks();
+    nextParked = isCurrent() ? pendingRestartRequest?.takeEmitHooks() : undefined;
   }
 
   // Non-emitted outcomes roll back every successfully prepared acknowledgement.
@@ -489,6 +502,10 @@ async function emitPreparedGatewayRestartUnderAdmission(
   // Slot settled and no awaits remain before emission — release ownership for
   // every emission attempt, not only hookless ones, so a later session can
   // claim continuation hooks for the next restart cycle.
+  if (!isCurrent()) {
+    await rejectPreparedRestartHooks(preparedHooksList);
+    return null;
+  }
   if (pendingRestartRequest) {
     pendingRestartRequest.sessionKey = undefined;
   }
@@ -523,6 +540,11 @@ async function emitPreparedGatewayRestartUnderAdmission(
           ...(successorOwner ? { successorOwner } : {}),
         }
       : intent;
+  // Revalidate after requester authority callbacks, with no await before emission.
+  if (!isCurrent()) {
+    await rejectPreparedRestartHooks(preparedHooksList);
+    return null;
+  }
   const emitResult = emitOwner?.emitRestart
     ? emitOwner.emitRestart(resolvedReason, resolvedIntent)
     : requestGatewayRestartWithSignalAdmission(resolvedReason, resolvedIntent);
@@ -549,12 +571,23 @@ async function emitPreparedGatewayRestart(
   intent?: GatewayRestartIntent,
   options: {
     finalIdleCheck?: () => boolean;
+    recheckBeforeEmit?: boolean;
     setFenceRollback?: (rollback: (() => void) | null) => void;
     signal?: AbortSignal;
     scheduledRequest?: PendingGatewayRestart;
   } = {},
 ): Promise<boolean> {
   const { finalIdleCheck, setFenceRollback, signal, scheduledRequest } = options;
+  const remainsIdle = () => {
+    try {
+      return (
+        (!finalIdleCheck || finalIdleCheck()) &&
+        getActiveGatewayRootWorkCount({ excludeCurrent: true }) === 0
+      );
+    } catch {
+      return false;
+    }
+  };
   const transientGeneration = restartTransientGeneration;
   const caller = scheduledRequest ? undefined : new GatewayRestartRequest(hooks);
   try {
@@ -618,7 +651,7 @@ async function emitPreparedGatewayRestart(
             reasonOverride,
             intent,
             transientGeneration,
-            () => fenceActive && !signal?.aborted,
+            () => fenceActive && !signal?.aborted && (!options.recheckBeforeEmit || remainsIdle()),
             scheduledRequest,
           );
           if (
@@ -667,6 +700,7 @@ export function deferGatewayRestartUntilIdle(
     maxWaitMs?: number;
     reason?: string;
     timeoutIntent?: GatewayRestartIntent;
+    abandonOnTimeout?: boolean;
   },
   scheduledRequest?: PendingGatewayRestart,
 ): RestartDeferralHandle {
@@ -707,6 +741,9 @@ export function deferGatewayRestartUntilIdle(
   const readPendingCount = (): number | undefined => {
     try {
       lastKnownPending = opts.getPendingCount();
+      if (opts.abandonOnTimeout && (!Number.isFinite(lastKnownPending) || lastKnownPending < 0)) {
+        return undefined;
+      }
       return lastKnownPending;
     } catch (err) {
       // Failed inspection is unknown, not evidence that live work has drained.
@@ -729,9 +766,17 @@ export function deferGatewayRestartUntilIdle(
       opts.reason,
       timedOut ? timeoutIntent : undefined,
       {
+        recheckBeforeEmit: opts.abandonOnTimeout === true,
         finalIdleCheck: timedOut
           ? undefined
           : () => {
+              if (
+                opts.abandonOnTimeout &&
+                maxWaitMs !== undefined &&
+                monotonicNow() - startedAt >= maxWaitMs
+              ) {
+                return false;
+              }
               const current = readPendingCount();
               return current !== undefined && current <= 0;
             },
@@ -781,6 +826,17 @@ export function deferGatewayRestartUntilIdle(
         timeoutNotified = true;
         opts.hooks?.onTimeout?.(lastKnownPending, elapsedMs);
       }
+      if (opts.abandonOnTimeout) {
+        // Retire this attempt and its reversible fence; never emit a timeout signal.
+        cancelled = true;
+        cancelAttempt();
+        stopPoll();
+        if (scheduledRequest && pendingRestartRequest === scheduledRequest) {
+          clearPendingScheduledRestart();
+        }
+        restartLog.warn("maintenance restart abandoned: idle deadline expired");
+        return;
+      }
       // Preparation gets a full configured budget, not merely one poll interval.
       // A stuck forced retry is subject to the same bound as the initial attempt.
       if (activeAttempt && now - activeAttempt.startedAt >= maxWaitMs) {
@@ -829,7 +885,19 @@ export function scheduleGatewayRestart(opts?: {
   sessionKey?: string;
   skipDeferral?: boolean;
   successorOwner?: GatewayRestartIntent["successorOwner"];
+  abandonOnTimeout?: boolean;
 }): ScheduledRestart {
+  const abandonOnTimeout = opts?.abandonOnTimeout === true;
+  if (abandonOnTimeout && opts?.skipDeferral) {
+    throw new Error("maintenance restart cannot bypass active-work deferral");
+  }
+  if (
+    (hasUnconsumedRestartSignal() && abandonOnTimeout) ||
+    ((pendingRestartTimer || pendingRestartPreparing) &&
+      pendingRestartAbandonOnTimeout !== abandonOnTimeout)
+  ) {
+    throw new Error("restart already pending with a different maintenance policy");
+  }
   const requestedDelayMs = normalizeGatewayRestartDelayMs(opts?.delayMs);
   const reason = normalizeRestartIntentReason(opts?.reason);
   const mode: ScheduledRestart["mode"] =
@@ -982,6 +1050,7 @@ export function scheduleGatewayRestart(opts?: {
   requestOwner.emitHooks = nextPendingEmitHooks;
   requestOwner.sessionKey = nextPendingSessionKey;
   pendingRestartSkipDeferral = skipDeferral;
+  pendingRestartAbandonOnTimeout = abandonOnTimeout;
   armPendingRestartTimer(requestedDueAt, nowMs);
   return result(Math.max(0, requestedDueAt - nowMs), false, opts?.emitHooks !== undefined);
 }
