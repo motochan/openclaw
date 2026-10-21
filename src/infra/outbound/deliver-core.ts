@@ -176,11 +176,14 @@ export async function deliverOutboundPayloadsCore(
     params.onPayloadDeliveryOutcome?.(outcome);
   }
   const deliveredMirrorPayloads: NormalizedOutboundPayload[] = [];
-  const recordDeliveredPayload = (payloadSummary: NormalizedOutboundPayload): void => {
+  const recordDeliveredPayload = (
+    payloadSummary: NormalizedOutboundPayload,
+    deliveredResults: readonly OutboundDeliveryResult[],
+  ): void => {
     // Post-send observers are bookkeeping only. Never turn an identified
     // platform delivery into a retryable failure if an observer misbehaves.
     try {
-      params.onDeliveredPayload?.(payloadSummary);
+      params.onDeliveredPayload?.(payloadSummary, deliveredResults);
     } catch (error) {
       log.warn("Outbound delivered-payload observer failed after platform send.", {
         channel,
@@ -402,7 +405,7 @@ export async function deliverOutboundPayloadsCore(
           status: "sent",
           results: deliveredResults,
         });
-        recordDeliveredPayload(mirroredPayload);
+        recordDeliveredPayload(mirroredPayload, deliveredResults);
       } else {
         recordSuppressedPayload(getSuppressionReason() ?? "adapter_returned_no_identity");
         if (getSuppressionReason() === "adapter_returned_no_send") {

@@ -85,6 +85,7 @@ type Tracking = {
   onRejected: (error: unknown) => void;
   onSilentSkip?: (error: unknown) => void;
   partialDeliveryResult?: () => PartialDeliveryResult;
+  onTextPlanCoverage?: (coverage: "complete" | "partial") => void;
 };
 
 export function createTelegramPreparedSender(config: {
@@ -239,8 +240,10 @@ export function createTelegramPreparedSender(config: {
     const start = parts.length;
     let firstRejectedError: unknown;
     let firstSilentSkipError: unknown;
-    const reject = (error: unknown) => {
+    let missingRequiredPart = false;
+    const reject = (error: unknown, required = true) => {
       if (isTelegramEmptyContentError(error)) {
+        missingRequiredPart ||= required;
         firstSilentSkipError ??= error;
         params.tracking.onSilentSkip?.(error);
         return;
@@ -254,12 +257,14 @@ export function createTelegramPreparedSender(config: {
     };
     let acceptedPages = 0;
     for (const [index, page] of params.pages.entries()) {
+      const required = Boolean(page.plainText.trim());
+      let pageAccepted = false;
       let prepared: ReturnType<typeof params.preparePage>;
       try {
         await config.beforeSend?.();
         prepared = params.preparePage(index, acceptedPages);
       } catch (error) {
-        reject(error);
+        reject(error, required);
         continue;
       }
       const sendPlainOrHtml = async (
@@ -291,7 +296,7 @@ export function createTelegramPreparedSender(config: {
           }
           // Keep the producer alive for a definite rejected plain part. A
           // rejected next() would close its generator and lose the remaining tail.
-          reject(error);
+          reject(error, Boolean(text.trim()));
           return undefined;
         }
       };
@@ -332,15 +337,17 @@ export function createTelegramPreparedSender(config: {
           try {
             next = await iterator.next();
           } catch (error) {
-            reject(error);
+            reject(error, required);
             break;
           }
           if (next.done) {
+            missingRequiredPart ||= required && !pageAccepted;
             acceptedPages += 1;
             prepared.delivered?.();
             break;
           }
           if (next.value.result) {
+            pageAccepted = true;
             const part = { ...next.value.result, plainText: next.value.page.plainText };
             await accept(part, params.observe, {
               partialDeliveryResult: params.tracking.partialDeliveryResult,
@@ -360,6 +367,7 @@ export function createTelegramPreparedSender(config: {
     if (parts.length === start && firstSilentSkipError !== undefined) {
       fail(firstSilentSkipError, start);
     }
+    params.tracking.onTextPlanCoverage?.(missingRequiredPart ? "partial" : "complete");
     return parts[start]?.messageId;
   };
 

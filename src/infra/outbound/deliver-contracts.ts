@@ -197,7 +197,10 @@ export type DeliverOutboundPayloadsCoreParams = OutboundChannelContext & {
   onError?: (err: unknown, payload: NormalizedOutboundPayload) => void;
   onPayload?: (payload: NormalizedOutboundPayload) => void;
   /** @internal Reports the effective payload only after an identified platform send. */
-  onDeliveredPayload?: (payload: NormalizedOutboundPayload) => void;
+  onDeliveredPayload?: (
+    payload: NormalizedOutboundPayload,
+    results?: readonly OutboundDeliveryResult[],
+  ) => void;
   onPayloadDeliveryOutcome?: (outcome: OutboundPayloadDeliveryOutcome) => void;
   /** @internal Reports a settled native payload for post-terminal message_sent observation. */
   onMessageSentEvent?: (event: MessageSentEvent, sourceIndex: number) => void;

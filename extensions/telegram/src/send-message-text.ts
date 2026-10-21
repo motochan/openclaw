@@ -97,9 +97,11 @@ export function createTelegramTextSender(config: {
 
     const start = sender.parts.length;
     let acceptedReplyToMessageId: number | undefined;
+    let textCoverage: "complete" | "partial" | undefined;
     const buildReceipt = () => {
       const receipt = sender.buildReceipt(start, "text");
       if (receipt.parts.length === 0) return undefined;
+      if (textCoverage) receipt.textCoverage = textCoverage;
       if (acceptedReplyToMessageId !== undefined) {
         receipt.replyToId = String(acceptedReplyToMessageId);
       }
@@ -192,6 +194,9 @@ export function createTelegramTextSender(config: {
     };
 
     const tracking = {
+      onTextPlanCoverage: (coverage: "complete" | "partial") => {
+        textCoverage = coverage;
+      },
       invalidate: () => opts.promptContextProjectionPlan?.cursor.invalidate(),
       onRejected: (error: unknown) =>
         logVerbose(
@@ -271,6 +276,7 @@ export function createTelegramTextSender(config: {
         ...(finalMeta ? { meta: finalMeta } : {}),
       };
     } catch (error) {
+      textCoverage = "partial";
       // Terminal/ambiguous failures escape chunk rejection before its invalidate
       // branch; the projection cursor must not claim clean custody for pages
       // that never landed (main's pre-centralization outer-catch contract).

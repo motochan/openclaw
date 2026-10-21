@@ -89,6 +89,8 @@ export type MessageReceiptPart = {
 
 /** Normalized receipt for all platform messages that make up a logical send. */
 export type MessageReceipt = {
+  /** Native terminal text-plan coverage; absent is UNKNOWN, never complete. */
+  textCoverage?: "complete" | "partial";
   primaryPlatformMessageId?: string;
   platformMessageIds: string[];
   parts: MessageReceiptPart[];

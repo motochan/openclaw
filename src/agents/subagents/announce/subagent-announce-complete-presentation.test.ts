@@ -26,7 +26,17 @@ afterEach(() => {
 
 async function fixture(
   options: {
-    native?: "sent" | "partial" | "observer" | "recipient" | "thread" | "missing-id";
+    native?:
+      | "sent"
+      | "partial"
+      | "observer"
+      | "recipient"
+      | "thread"
+      | "missing-id"
+      | "silent-tail"
+      | "observer-first"
+      | "observer-tail"
+      | "unknown-coverage";
     retained?: boolean;
     hook?: { content?: string; cancel?: boolean };
     onHook?: (child: SubagentRunRecord) => void;
@@ -67,6 +77,8 @@ async function fixture(
     findSessionTranscriptArchiveEventReadOnly: async () => undefined,
   });
   const received: string[] = [];
+  let physicalCalls = 0;
+  let terminalCoverage: "complete" | "partial" | undefined;
   const plugin = createOutboundTestPlugin({
     id: "telegram",
     outbound: {
@@ -81,6 +93,9 @@ async function fixture(
             textMode: "html",
             api: {
               sendMessage: async (_chatId, physicalText) => {
+                physicalCalls++;
+                if (options.native === "silent-tail" && received.length === 1)
+                  throw new Error("Bad Request: message text is empty");
                 if (options.native === "partial" && received.length === 1)
                   throw new Error("physical second part rejected");
                 received.push(physicalText);
@@ -101,6 +116,11 @@ async function fixture(
               },
             },
             onDeliveryResult: async (delivery) => {
+              if (
+                options.native === "observer-first" ||
+                (options.native === "observer-tail" && received.length === 2)
+              )
+                throw new Error("observer failed before forwarding");
               await onDeliveryResult?.({
                 channel: "telegram",
                 messageId: delivery.messageId,
@@ -111,6 +131,9 @@ async function fixture(
                 throw new Error("physical observer failed after accept");
             },
           });
+          terminalCoverage = sent.receipt?.textCoverage;
+          if (options.native === "unknown-coverage" && sent.receipt)
+            delete sent.receipt.textCoverage;
           return {
             channel: "telegram",
             messageId: sent.messageId,
@@ -152,10 +175,73 @@ async function fixture(
     sourceSessionKey: child.childSessionKey,
     preparedResult: prepared,
   };
-  return { child, prepared, received, params, deliver: () => deliverCompletionDirect(params) };
+  const completionEvent = params.internalEvents?.[0];
+  if (!completionEvent) throw new Error("Fixture requires one completion event");
+  return {
+    child,
+    prepared,
+    received,
+    params,
+    completionEvent,
+    physicalCalls: () => physicalCalls,
+    terminalCoverage: () => terminalCoverage,
+    deliver: () => deliverCompletionDirect(params),
+  };
 }
 
 describe("complete direct result presentation", () => {
+  it("does not credit an empty-rejected required tail of the native Telegram plan", async () => {
+    const f = await fixture({ native: "silent-tail" });
+    const result = await f.deliver();
+    expect(f.physicalCalls()).toBe(3); // initial HTML success, tail HTML/plain rejections
+    expect(f.received).toHaveLength(1);
+    expect(f.received.join("").length).toBe(4_000);
+    expect(text.length).toBe(5_002);
+    expect(f.terminalCoverage()).toBe("partial");
+    expect(result).toMatchObject({
+      delivered: false,
+      terminal: true,
+      disposition: "permanent_failure",
+    });
+    expect(result?.acceptedResultParts?.map((part) => part.platformMessageId)).toEqual(["1"]);
+    expect(result?.completeResultReceipt).toBeUndefined();
+  });
+  it.each(["observer-first", "observer-tail"] as const)(
+    "retains native acceptance when %s fails before forwarding",
+    async (native) => {
+      const f = await fixture({ native });
+      const result = await f.deliver();
+      const count = native === "observer-first" ? 1 : 2;
+      expect(f.physicalCalls()).toBe(count);
+      expect(f.received).toHaveLength(count);
+      expect(result).toMatchObject({
+        delivered: false,
+        terminal: true,
+        disposition: "permanent_failure",
+      });
+      expect(result?.acceptedResultParts?.map((part) => part.platformMessageId)).toEqual(
+        count === 1 ? ["1"] : ["1", "2"],
+      );
+      expect(result?.completeResultReceipt).toBeUndefined();
+    },
+  );
+  it("does not treat missing terminal native plan coverage as complete", async () => {
+    const f = await fixture({ native: "unknown-coverage" });
+    const result = await f.deliver();
+    expect(f.received.join("")).toBe(text);
+    expect(result?.completeResultReceipt).toBeUndefined();
+    expect(result?.acceptedResultParts).toHaveLength(2);
+  });
+  it("does not infer a missing account on recovered pre-forward acceptance", async () => {
+    const f = await fixture({ native: "observer-first" });
+    delete f.params.deliveryTarget.accountId;
+    const result = await f.deliver();
+    expect(f.physicalCalls()).toBe(1);
+    expect(result).toMatchObject({ delivered: false, terminal: true });
+    expect(result?.acceptedResultParts).toBeUndefined();
+    expect(result?.completeResultReceipt).toBeUndefined();
+  });
+
   it("joins actual Telegram API accepted parts to the exact complete presentation", async () => {
     const f = await fixture({ native: "sent" });
     const result = await f.deliver();
@@ -218,12 +304,15 @@ describe("complete direct result presentation", () => {
       const f = await fixture();
       if (mismatch === "run") f.params.sourceRunId = "different-run";
       else if (mismatch === "child")
-        f.params.internalEvents![0].childSessionKey = "agent:main:subagent:other";
-      else
+        f.completionEvent.childSessionKey = "agent:main:subagent:other";
+      else {
+        const identity = f.prepared.completeResult;
+        if (!identity) throw new Error("Fixture requires complete retained identity");
         f.prepared.completeResult = {
-          ...f.prepared.completeResult!,
+          ...identity,
           ...(mismatch === "hash" ? { resultHash: "0".repeat(64) } : { utf8ByteLength: 1 }),
         };
+      }
       const result = await f.deliver();
       expect(f.received.join("").length).toBe(4_096);
       expect(result?.completeResultPresentation).toBeUndefined();
@@ -271,7 +360,7 @@ describe("complete direct result presentation", () => {
   });
   it("does not send a silent completion event", async () => {
     const f = await fixture();
-    f.params.internalEvents![0].result = "NO_REPLY";
+    f.completionEvent.result = "NO_REPLY";
     const result = await f.deliver();
     expect(f.received).toHaveLength(0);
     expect(result?.completeResultPresentation).toBeUndefined();

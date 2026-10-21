@@ -15,6 +15,7 @@ import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { waitForGatewayDispatch } from "../../../gateway/server-in-process-dispatch.js";
 import type { GatewayRecoveryTypingParams } from "../../../gateway/server-instance-runtime.types.js";
 import { getGatewayRecoveryRuntime } from "../../../gateway/server-recovery-runtime-context.js";
+import { isOutboundDeliveryError } from "../../../infra/outbound/deliver-types.js";
 import { normalizeOutboundReplyPayloadCore } from "../../../infra/outbound/reply-payload-normalize.js";
 import { sourceDeliveryTargetsMatch } from "../../../infra/outbound/source-delivery-plan.js";
 import { splitMediaFromOutput } from "../../../media/parse.js";
@@ -509,8 +510,10 @@ export async function deliverCompletionDirect(params: {
         continue;
       }
       const previous = acceptedParts.get(part.platformMessageId);
-      if (previous && previous.acceptance.acceptedAtMs !== acceptance.acceptedAtMs)
-        acceptanceUnknown = true;
+      if (previous) {
+        if (previous.acceptance.acceptedAtMs !== acceptance.acceptedAtMs) acceptanceUnknown = true;
+        continue;
+      }
       acceptedParts.set(
         part.platformMessageId,
         Object.freeze({ platformMessageId: part.platformMessageId, acceptance }),
@@ -553,13 +556,21 @@ export async function deliverCompletionDirect(params: {
       onPlatformSendDispatch: async () => assertDeliveryCurrent(),
       assertDirectAdapterHandoff: assertDeliveryCurrent,
       onDeliveryResult: (result) => retainReceipt(result.receipt),
-      onDeliveredPayload: (payload) => {
+      onDeliveredPayload: (payload, results = []) => {
         if (committedDelivery) {
           return;
         }
         // This single payload must finish every chunk and attachment before settling,
         // still ahead of potentially blocked transcript mirroring.
         const identity = completionContent?.completeResult;
+        // The final adapter receipts, not progress callbacks or original text,
+        // own physical plan coverage. Missing coverage remains UNKNOWN.
+        const completeCoverage =
+          results.length > 0 &&
+          results.every((result) => result.receipt?.textCoverage === "complete");
+        const incompleteCoverage = results.some(
+          (result) => result.receipt?.textCoverage === "partial",
+        );
         const completePresentation =
           identity &&
           isCurrent() &&
@@ -570,13 +581,24 @@ export async function deliverCompletionDirect(params: {
           !payload.location &&
           matchesCompleteResultText(payload.text, identity);
         committedDelivery = {
-          delivered: true,
+          delivered: !incompleteCoverage,
           path: "direct",
           deliveredAt: Date.now(),
+          ...(incompleteCoverage
+            ? {
+                terminal: true,
+                disposition: "permanent_failure" as const,
+                error:
+                  "required text plan was only partially accepted; automatic retry would duplicate sent chunks",
+              }
+            : {}),
           // Effective post-hook payload membership only, NOT a physical receipt.
           ...(completePresentation ? { completeResultPresentation: identity } : {}),
           ...(acceptedParts.size ? { acceptedResultParts: snapshotAcceptedParts() } : {}),
-          ...(completePresentation && !acceptanceUnknown && acceptedParts.size > 0
+          ...(completePresentation &&
+          completeCoverage &&
+          !acceptanceUnknown &&
+          acceptedParts.size > 0
             ? {
                 completeResultReceipt: Object.freeze({
                   result: identity,
@@ -626,7 +648,19 @@ export async function deliverCompletionDirect(params: {
       return committedDelivery;
     }
     if (hasAnnounceSendEvidence(err)) {
-      if (isChannelPartialDeliveryError(err)) retainReceipt(err.deliveryResult.receipt);
+      const seen = new Set<unknown>();
+      let current: unknown = err;
+      // Follow only native typed delivery wrappers, with cycle/depth bounds.
+      for (let depth = 0; depth < 8 && !seen.has(current); depth++) {
+        seen.add(current);
+        if (isChannelPartialDeliveryError(current)) {
+          retainReceipt(current.deliveryResult.receipt);
+          current = current.cause;
+        } else if (isOutboundDeliveryError(current)) {
+          for (const result of current.results) retainReceipt(result.receipt);
+          current = current.cause;
+        } else break;
+      }
       return {
         ...(acceptedParts.size ? { acceptedResultParts: snapshotAcceptedParts() } : {}),
         delivered: false,
