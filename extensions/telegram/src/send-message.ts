@@ -162,6 +162,7 @@ export async function sendMessageTelegram(
     const sender = createTelegramPreparedSender({
       api,
       chatId,
+      accountId: account.accountId,
       warn: (message) => sendLogger.warn(message),
       request: async (send, label, options) => {
         await opts.onPlatformSendDispatch?.();

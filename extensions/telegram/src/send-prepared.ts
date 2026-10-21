@@ -1,5 +1,6 @@
 import type { InputFile } from "grammy";
 import type { InlineKeyboardMarkup, Message } from "grammy/types";
+import type { MessageReceipt, MessageReceiptPartKind } from "openclaw/plugin-sdk/channel-outbound";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { createChannelApiRetryRunner } from "openclaw/plugin-sdk/retry-runtime";
 import { logVerbose, type RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
@@ -63,7 +64,12 @@ export type TelegramPreparedSendPart = {
 };
 
 type TextFallback = { index: number; count: number };
-type AcceptedPart = TelegramPreparedSendPart & { messageId: number; hasInlineKeyboard: boolean };
+type AcceptedPart = TelegramPreparedSendPart & {
+  messageId: number;
+  hasInlineKeyboard: boolean;
+  acceptedAtMs: number;
+  acceptance?: MessageReceipt["parts"][number]["acceptance"];
+};
 type ObservePart = (part: AcceptedPart) => Promise<void>;
 type PartialDeliveryResult = Omit<
   Parameters<typeof mergeTelegramPartialDeliveryError>[1],
@@ -84,6 +90,7 @@ type Tracking = {
 export function createTelegramPreparedSender(config: {
   api: TelegramApi;
   chatId: string;
+  accountId?: string;
   request: PreparedRequest;
   warn: (message: string) => void;
   beforeSend?: () => Promise<void>;
@@ -91,19 +98,66 @@ export function createTelegramPreparedSender(config: {
   onMediaAccepted?: (mediaUrls: readonly string[]) => void;
 }) {
   const parts: AcceptedPart[] = [];
+  const buildReceipt = (start = 0, kind: MessageReceiptPartKind = "unknown"): MessageReceipt => {
+    const selected = parts.slice(start);
+    const ids = selected.map((part) => String(part.messageId));
+    return {
+      ...(ids[0] ? { primaryPlatformMessageId: ids[0] } : {}),
+      platformMessageIds: ids,
+      parts: selected.map((part, index) => ({
+        platformMessageId: String(part.messageId),
+        kind,
+        index,
+        ...(part.acceptance ? { acceptance: part.acceptance } : {}),
+        ...(part.acceptance?.threadId ? { threadId: part.acceptance.threadId } : {}),
+      })),
+      sentAt: selected.at(-1)?.acceptedAtMs ?? Date.now(),
+    };
+  };
   const fail = (error: unknown, start = 0, details?: PartialDeliveryResult): never => {
     if (parts.length === start) {
       throw error;
     }
+    const acceptedReceipt = buildReceipt(start);
+    const priorParts = new Map(
+      details?.receipt?.parts.map((part) => [part.platformMessageId, part]),
+    );
+    // Preserve existing provider placement/reply metadata while the acceptance
+    // owner supplies every part, including ones whose observer never completed.
+    const receipt = {
+      ...details?.receipt,
+      ...acceptedReceipt,
+      parts: acceptedReceipt.parts.map((part) => ({
+        ...part,
+        ...priorParts.get(part.platformMessageId),
+        ...(part.acceptance ? { acceptance: part.acceptance } : {}),
+      })),
+    };
     throw mergeTelegramPartialDeliveryError(error, {
       ...details,
+      receipt,
       messageIds: parts.slice(start).map((part) => String(part.messageId)),
       visibleReplySent: true,
     });
   };
   const recordAcceptance = (part: TelegramPreparedSendPart) => {
+    const acceptedAtMs = Date.now();
+    const observedThread =
+      part.result.message_thread_id ?? part.result.direct_messages_topic?.topic_id;
+    const acceptance =
+      config.accountId && part.result.chat?.id !== undefined
+        ? Object.freeze({
+            channel: "telegram",
+            accountId: config.accountId,
+            to: String(part.result.chat.id),
+            threadId: observedThread === undefined ? null : String(observedThread),
+            acceptedAtMs,
+          })
+        : undefined;
     const accepted = {
       ...part,
+      acceptedAtMs,
+      ...(acceptance ? { acceptance } : {}),
       messageId: resolveTelegramMessageIdOrThrow(part.result, "send"),
       hasInlineKeyboard: Boolean(part.acceptedParams.reply_markup),
     };
@@ -394,7 +448,7 @@ export function createTelegramPreparedSender(config: {
       ...(delivery.captionRemoved ? { captionRemoved: true as const } : {}),
     };
   };
-  return { parts, accept, acceptMany, fail, sendText, sendMedia, sendPhotoAlbum };
+  return { parts, buildReceipt, accept, acceptMany, fail, sendText, sendMedia, sendPhotoAlbum };
 }
 
 export type TelegramPreparedSender = ReturnType<typeof createTelegramPreparedSender>;

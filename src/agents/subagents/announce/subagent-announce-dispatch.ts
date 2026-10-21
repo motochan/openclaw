@@ -1,3 +1,4 @@
+import type { MessageReceiptPart } from "../../../channels/message/types.js";
 import type { PreparedCompleteSubagentResult } from "./subagent-announce-result.js";
 
 type SubagentDeliveryPath = "steered" | "direct" | "queued" | "none";
@@ -31,6 +32,19 @@ export type SubagentAnnounceDeliveryResult = {
   enqueuedAt?: number;
   /** Complete effective payload membership only; absent is UNKNOWN, never a channel receipt. */
   completeResultPresentation?: PreparedCompleteSubagentResult;
+  /** Positive physical facts only. Partial sends retain these without a complete receipt. */
+  acceptedResultParts?: ReadonlyArray<
+    Readonly<{
+      platformMessageId: string;
+      acceptance: NonNullable<MessageReceiptPart["acceptance"]>;
+    }>
+  >;
+  completeResultReceipt?: Readonly<{
+    result: PreparedCompleteSubagentResult;
+    platformMessageIds: readonly string[];
+    acceptedAtMs: number;
+    scope: "complete";
+  }>;
   /** Direct delivery that already committed the requester's visible final. */
   requesterVisibleFinalDelivered?: true;
   storeReplaced?: true;

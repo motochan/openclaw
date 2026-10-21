@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { asOptionalObjectRecord, isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { sanitizePendingFinalDeliveryText } from "../../../auto-reply/reply/pending-final-delivery-state.js";
+import type { MessageReceipt } from "../../../channels/message/types.js";
+import { isChannelPartialDeliveryError } from "../../../channels/turn/partial-delivery-error.js";
 import {
   getRestartRecoveryTerminalDeliveryEvidence,
   hasRestartRecoverySourceClaim,
@@ -475,6 +477,48 @@ export async function deliverCompletionDirect(params: {
   const idempotencyKey = `${params.directIdempotencyKey}:text-direct`;
   let committedDelivery: SubagentAnnounceDeliveryResult | undefined;
   let deliveryResultReported: Promise<void> | undefined;
+  const acceptedParts = new Map<
+    string,
+    NonNullable<SubagentAnnounceDeliveryResult["acceptedResultParts"]>[number]
+  >();
+  let acceptanceUnknown = false;
+  const retainReceipt = (receipt: MessageReceipt | undefined) => {
+    if (
+      !receipt?.parts.length ||
+      receipt.platformMessageIds.some(
+        (id) => !receipt.parts.some((part) => part.platformMessageId === id),
+      )
+    ) {
+      acceptanceUnknown = true;
+      return;
+    }
+    for (const part of receipt.parts) {
+      const acceptance = part.acceptance;
+      if (
+        !acceptance ||
+        acceptance.channel !== "telegram" ||
+        acceptance.accountId !== params.deliveryTarget.accountId ||
+        acceptance.to !== params.deliveryTarget.to ||
+        acceptance.threadId !== (params.deliveryTarget.threadId ?? null) ||
+        !/^[1-9][0-9]*$/.test(part.platformMessageId) ||
+        !Number.isFinite(acceptance.acceptedAtMs) ||
+        acceptance.acceptedAtMs <= 0 ||
+        acceptance.acceptedAtMs > Date.now()
+      ) {
+        acceptanceUnknown = true;
+        continue;
+      }
+      const previous = acceptedParts.get(part.platformMessageId);
+      if (previous && previous.acceptance.acceptedAtMs !== acceptance.acceptedAtMs)
+        acceptanceUnknown = true;
+      acceptedParts.set(
+        part.platformMessageId,
+        Object.freeze({ platformMessageId: part.platformMessageId, acceptance }),
+      );
+    }
+  };
+  const snapshotAcceptedParts = () => Object.freeze([...acceptedParts.values()]);
+
   const isCurrent = () =>
     params.isSourceSessionEffectsAllowed?.() !== false &&
     (params.preparedResult?.isCurrent() ?? true);
@@ -508,6 +552,7 @@ export async function deliverCompletionDirect(params: {
       abortSignal: params.signal,
       onPlatformSendDispatch: async () => assertDeliveryCurrent(),
       assertDirectAdapterHandoff: assertDeliveryCurrent,
+      onDeliveryResult: (result) => retainReceipt(result.receipt),
       onDeliveredPayload: (payload) => {
         if (committedDelivery) {
           return;
@@ -530,6 +575,19 @@ export async function deliverCompletionDirect(params: {
           deliveredAt: Date.now(),
           // Effective post-hook payload membership only, NOT a physical receipt.
           ...(completePresentation ? { completeResultPresentation: identity } : {}),
+          ...(acceptedParts.size ? { acceptedResultParts: snapshotAcceptedParts() } : {}),
+          ...(completePresentation && !acceptanceUnknown && acceptedParts.size > 0
+            ? {
+                completeResultReceipt: Object.freeze({
+                  result: identity,
+                  platformMessageIds: Object.freeze([...acceptedParts.keys()]),
+                  acceptedAtMs: Math.max(
+                    ...[...acceptedParts.values()].map((part) => part.acceptance.acceptedAtMs),
+                  ),
+                  scope: "complete" as const,
+                }),
+              }
+            : {}),
         };
         deliveryResultReported = Promise.resolve(
           params.onDeliveryResult?.(committedDelivery),
@@ -568,7 +626,9 @@ export async function deliverCompletionDirect(params: {
       return committedDelivery;
     }
     if (hasAnnounceSendEvidence(err)) {
+      if (isChannelPartialDeliveryError(err)) retainReceipt(err.deliveryResult.receipt);
       return {
+        ...(acceptedParts.size ? { acceptedResultParts: snapshotAcceptedParts() } : {}),
         delivered: false,
         path: "direct",
         terminal: true,

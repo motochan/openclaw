@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { sendMessageTelegram } from "../../../../extensions/telegram/runtime-api.js";
 import { chunkText } from "../../../auto-reply/chunk.js";
 import {
   initializeGlobalHookRunner,
@@ -25,6 +26,7 @@ afterEach(() => {
 
 async function fixture(
   options: {
+    native?: "sent" | "partial" | "observer" | "recipient" | "thread" | "missing-id";
     retained?: boolean;
     hook?: { content?: string; cancel?: boolean };
     onHook?: (child: SubagentRunRecord) => void;
@@ -70,8 +72,52 @@ async function fixture(
     outbound: {
       deliveryMode: "direct",
       chunker: chunkText,
-      textChunkLimit: 2_000,
-      sendText: async ({ text: chunk }) => {
+      textChunkLimit: options.native ? 100_000 : 2_000,
+      sendText: async ({ text: chunk, onDeliveryResult }) => {
+        if (options.native) {
+          const sent = await sendMessageTelegram("12345", chunk, {
+            cfg: { channels: { telegram: { botToken: "123456:fixture", richMessages: false } } },
+            accountId: "default",
+            textMode: "html",
+            api: {
+              sendMessage: async (_chatId, physicalText) => {
+                if (options.native === "partial" && received.length === 1)
+                  throw new Error("physical second part rejected");
+                received.push(physicalText);
+                return {
+                  message_id:
+                    options.native === "missing-id" && received.length === 2
+                      ? Number.NaN
+                      : received.length,
+                  date: 1,
+                  chat: {
+                    id: options.native === "recipient" ? 456 : 12345,
+                    type: "private" as const,
+                    first_name: "fixture",
+                  },
+                  text: physicalText,
+                  ...(options.native === "thread" ? { message_thread_id: 77 } : {}),
+                };
+              },
+            },
+            onDeliveryResult: async (delivery) => {
+              await onDeliveryResult?.({
+                channel: "telegram",
+                messageId: delivery.messageId,
+                receipt: delivery.receipt,
+                target: { kind: "chat", id: delivery.chatId },
+              });
+              if (options.native === "observer" && received.length === 2)
+                throw new Error("physical observer failed after accept");
+            },
+          });
+          return {
+            channel: "telegram",
+            messageId: sent.messageId,
+            receipt: sent.receipt,
+            target: { kind: "chat", id: sent.chatId },
+          };
+        }
         received.push(chunk);
         return { channel: "telegram", messageId: String(received.length) };
       },
@@ -96,7 +142,7 @@ async function fixture(
     cfg: {},
     requesterSessionKey: child.requesterSessionKey,
     directIdempotencyKey: "presentation-fixture",
-    deliveryTarget: { deliver: true, channel: "telegram", to: "12345" },
+    deliveryTarget: { deliver: true, channel: "telegram", to: "12345", accountId: "default" },
     internalEvents: taskCompletionEvents({
       childSessionKey: child.childSessionKey,
       result: prepared.text ?? "NO_REPLY",
@@ -110,6 +156,46 @@ async function fixture(
 }
 
 describe("complete direct result presentation", () => {
+  it("joins actual Telegram API accepted parts to the exact complete presentation", async () => {
+    const f = await fixture({ native: "sent" });
+    const result = await f.deliver();
+    expect(f.received).toHaveLength(2);
+    expect(f.received.join("")).toBe(text);
+    expect(result?.completeResultReceipt).toMatchObject({
+      scope: "complete",
+      platformMessageIds: ["1", "2"],
+      result: f.prepared.completeResult,
+    });
+    expect(result?.acceptedResultParts).toHaveLength(2);
+    for (const part of result?.acceptedResultParts ?? []) {
+      expect(part.acceptance).toMatchObject({
+        channel: "telegram",
+        accountId: "default",
+        to: "12345",
+        threadId: null,
+        acceptedAtMs: expect.any(Number),
+      });
+      expect(Object.isFrozen(part.acceptance)).toBe(true);
+      expect(part).not.toHaveProperty("raw");
+      expect(part).not.toHaveProperty("text");
+    }
+  });
+  it.each(["partial", "observer", "recipient", "thread", "missing-id"] as const)(
+    "never promotes actual Telegram %s acceptance to a complete result",
+    async (native) => {
+      const f = await fixture({ native });
+      const result = await f.deliver();
+      expect(f.received.length).toBeGreaterThan(0);
+      expect(result?.completeResultReceipt).toBeUndefined();
+      if (native === "partial" || native === "observer" || native === "missing-id") {
+        expect(result?.acceptedResultParts?.map((part) => part.platformMessageId)).toEqual(
+          native === "observer" ? ["1", "2"] : ["1"],
+        );
+        expect(result?.delivered).not.toBe(true);
+      }
+    },
+  );
+
   it("materializes the retained full result through actual outbound chunking", async () => {
     const f = await fixture();
     const result = await f.deliver();

@@ -1,5 +1,4 @@
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
-import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/channel-outbound";
 import type { MarkdownTableMode, OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { resolveChunkMode } from "openclaw/plugin-sdk/reply-chunking";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
@@ -98,19 +97,12 @@ export function createTelegramTextSender(config: {
 
     const start = sender.parts.length;
     let acceptedReplyToMessageId: number | undefined;
-    const deliveryResults: TelegramSendResult[] = [];
     const buildReceipt = () => {
-      if (deliveryResults.length < 2) {
-        return deliveryResults[0]?.receipt;
+      const receipt = sender.buildReceipt(start, "text");
+      if (receipt.parts.length === 0) return undefined;
+      if (acceptedReplyToMessageId !== undefined) {
+        receipt.replyToId = String(acceptedReplyToMessageId);
       }
-      const receipt = createMessageReceiptFromOutboundResults({
-        results: deliveryResults,
-        kind: "text",
-        ...(typeof acceptedReplyToMessageId === "number"
-          ? { replyToId: String(acceptedReplyToMessageId) }
-          : {}),
-      });
-      receipt.parts = receipt.parts.map((part, index) => ({ ...part, index }));
       return receipt;
     };
     let pendingChunk: PendingChunk | undefined;
@@ -159,7 +151,11 @@ export function createTelegramTextSender(config: {
       }
     };
 
-    const record = async (params: Omit<PendingChunk, "reportChatId">) => {
+    const record = async (
+      params: Omit<PendingChunk, "reportChatId"> & {
+        acceptance?: TelegramPreparedSender["parts"][number]["acceptance"];
+      },
+    ) => {
       const { messageId } = params;
       acceptedReplyToMessageId ??= resolveAcceptedReplyToMessageId(params.acceptedParams);
       if (sender.parts.length === start + 1) {
@@ -178,7 +174,7 @@ export function createTelegramTextSender(config: {
           telegramHasInlineKeyboard: params.hasInlineKeyboard,
         },
         kind: "text",
-        onPrepared: (delivery) => deliveryResults.push(delivery),
+        acceptance: params.acceptance,
       });
       const previousChunk = pendingChunk;
       pendingChunk = {

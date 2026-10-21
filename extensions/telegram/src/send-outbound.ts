@@ -3,6 +3,7 @@ import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-i
 import {
   createMessageReceiptFromOutboundResults,
   type MessageReceiptPartKind,
+  type MessageReceipt,
 } from "openclaw/plugin-sdk/channel-outbound";
 import type { TelegramThreadSpec } from "./bot/helpers.js";
 import {
@@ -86,6 +87,7 @@ export function buildTelegramProviderDeliveryResult(params: {
   successfulSendThread?: TelegramThreadSpec;
   kind?: MessageReceiptPartKind;
   meta?: TelegramSendResult["meta"];
+  acceptance?: MessageReceipt["parts"][number]["acceptance"];
 }): TelegramSendResult {
   const messageId = String(params.messageId);
   const chatId = String(params.message.chat?.id ?? params.fallbackChatId);
@@ -96,12 +98,33 @@ export function buildTelegramProviderDeliveryResult(params: {
   return {
     messageId,
     chatId,
-    ...(providerThreadId !== undefined
+    ...(providerThreadId !== undefined || params.acceptance
       ? {
           receipt: createMessageReceiptFromOutboundResults({
-            results: [{ messageId, chatId }],
+            results: [
+              {
+                messageId,
+                chatId,
+                ...(params.acceptance
+                  ? {
+                      receipt: {
+                        platformMessageIds: [messageId],
+                        parts: [
+                          {
+                            platformMessageId: messageId,
+                            kind: params.kind ?? "unknown",
+                            index: 0,
+                            acceptance: params.acceptance,
+                          },
+                        ],
+                        sentAt: params.acceptance.acceptedAtMs,
+                      },
+                    }
+                  : {}),
+              },
+            ],
             ...(params.kind !== undefined ? { kind: params.kind } : {}),
-            threadId: String(providerThreadId),
+            ...(providerThreadId !== undefined ? { threadId: String(providerThreadId) } : {}),
           }),
         }
       : {}),

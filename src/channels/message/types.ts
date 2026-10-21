@@ -77,6 +77,14 @@ export type MessageReceiptPart = {
   threadId?: string;
   replyToId?: string;
   raw?: MessageReceiptSourceResult;
+  /** Immutable provider-acceptance metadata; missing fields never imply acceptance. */
+  acceptance?: Readonly<{
+    channel: string;
+    accountId: string;
+    to: string;
+    threadId: string | null;
+    acceptedAtMs: number;
+  }>;
 };
 
 /** Normalized receipt for all platform messages that make up a logical send. */
