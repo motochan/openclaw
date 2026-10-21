@@ -154,7 +154,8 @@ export function projectSubagentResultDelivery(entry: SubagentRunRecord) {
     deliveryGeneration: entry.delivery?.generation ?? 0,
   };
   const evidence = normalizeSubagentResultDelivery(entry, entry.delivery?.resultDelivery);
-  if (!evidence)
+  const firstPart = evidence?.acceptedParts[0];
+  if (!evidence || !firstPart)
     return {
       ...base,
       status: "UNKNOWN",
@@ -178,7 +179,7 @@ export function projectSubagentResultDelivery(entry: SubagentRunRecord) {
       reason: "receipt_export_limit",
     };
   }
-  const first = evidence.acceptedParts[0].acceptance;
+  const first = firstPart.acceptance;
   const complete = evidence.completeReceipt;
   return {
     ...base,

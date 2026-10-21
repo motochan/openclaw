@@ -767,40 +767,47 @@ it.each([
     requesterOrigin: { channel: "telegram", to: "123", accountId: "default" },
   });
   fixture.announce.mockImplementation(async (params) => {
-    const delivery = acceptedChildResult(subagentRuns.get(run.runId)!, mode !== "partial");
-    if (mode === "child")
-      delivery.completeResultReceipt!.result = {
-        ...delivery.completeResultReceipt!.result,
-        childSessionKey: "agent:main:subagent:other",
+    const entry = subagentRuns.get(run.runId);
+    if (!entry) throw new Error("Fixture requires the registered child run");
+    const delivery = acceptedChildResult(entry, mode !== "partial");
+    if (mode === "child" || mode === "hash" || mode === "generation") {
+      const receipt = delivery.completeResultReceipt;
+      if (!receipt) throw new Error("Fixture requires a complete result receipt");
+      delivery.completeResultReceipt = {
+        ...receipt,
+        result: {
+          ...receipt.result,
+          ...(mode === "child"
+            ? { childSessionKey: "agent:main:subagent:other" }
+            : mode === "hash"
+              ? { resultHash: "0".repeat(64) }
+              : { runIdentity: "stale-generation" }),
+        },
       };
-    if (mode === "hash")
-      delivery.completeResultReceipt!.result = {
-        ...delivery.completeResultReceipt!.result,
-        resultHash: "0".repeat(64),
-      };
-    if (mode === "generation")
-      delivery.completeResultReceipt!.result = {
-        ...delivery.completeResultReceipt!.result,
-        runIdentity: "stale-generation",
-      };
-    if (mode === "account" || mode === "thread")
+    }
+    if (mode === "account" || mode === "thread") {
+      const firstPart = delivery.acceptedResultParts?.[0];
+      if (!firstPart) throw new Error("Fixture requires an accepted physical part");
       delivery.acceptedResultParts = [
         {
           platformMessageId: "501",
           acceptance: {
-            ...delivery.acceptedResultParts![0].acceptance,
+            ...firstPart.acceptance,
             ...(mode === "account" ? { accountId: "other" } : { threadId: "77" }),
           },
         },
       ];
+    }
     await params.onDeliveryResult?.(delivery);
     if (mode === "duplicate") {
+      const receipt = delivery.completeResultReceipt;
+      if (!receipt) throw new Error("Fixture requires a complete result receipt");
       await params.onDeliveryResult?.(delivery);
       await params.onDeliveryResult?.({
         ...delivery,
         completeResultReceipt: {
-          ...delivery.completeResultReceipt!,
-          result: { ...delivery.completeResultReceipt!.result, resultHash: "f".repeat(64) },
+          ...receipt,
+          result: { ...receipt.result, resultHash: "f".repeat(64) },
         },
       });
     }
