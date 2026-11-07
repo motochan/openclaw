@@ -13,6 +13,7 @@ import { CronCliError } from "./cron-cli-error.js";
 import { listCronJobsFromGateway } from "./list-jobs.js";
 import { createCronOutputCommand } from "./output-mode.js";
 import { registerCronMutationOptions } from "./register.cron-options.js";
+import { parseCronReplayOptions } from "./replay-options.js";
 import { resolveCronCreateScheduleFromArgs } from "./schedule-options.js";
 import {
   assertCronCliJobSpec,
@@ -95,6 +96,9 @@ export function registerCronAddCommand(cron: Command) {
       "add",
     )
       .option("--declaration-key <key>", "Key to avoid duplicate declarations")
+      .option("--operation-id <id>", "Operation ID from a host replay admission")
+      .option("--effect-id <id>", "Effect ID from the same host admission")
+      .option("--attempt <number>", "Reviewed attempt number (defaults to 1 with replay IDs)")
       .option("--disabled", "Create job disabled", false)
       .action(
         async (
@@ -104,6 +108,7 @@ export function registerCronAddCommand(cron: Command) {
           cmd: Command,
         ) => {
           try {
+            const replay = parseCronReplayOptions(opts);
             for (const [flag, cwd] of [
               ["--command-cwd", opts.commandCwd],
               ["--on-exit-cwd", opts.onExitCwd],
@@ -340,6 +345,7 @@ export function registerCronAddCommand(cron: Command) {
             }
 
             const params = {
+              ...(replay ? { replay } : {}),
               name,
               declarationKey,
               displayName,

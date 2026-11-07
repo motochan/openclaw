@@ -1,4 +1,5 @@
 import type { CronEventAdmission } from "../event-source.js";
+import type { CronReplayRequest, CronReplayOutcome } from "../replay.js";
 import type { CronJob } from "../types.js";
 import type { CronRunReceiptHandle } from "./run-receipt.types.js";
 
@@ -31,12 +32,14 @@ export type CronRunQueueOperations = {
           preserveSchedule?: boolean;
           scheduleOwnershipAtMs?: number;
           requestRunId?: string;
+          replay?: CronReplayRequest;
         }
       >;
     };
     output: {
       accepted: CronQueuedRun[];
       rejected: Array<{ jobId: string; receiptId: string; reason: string }>;
+      replayed?: CronReplayOutcome[];
     };
   };
   "cron.drainQueue": {

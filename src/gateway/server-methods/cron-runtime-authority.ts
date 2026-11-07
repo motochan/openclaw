@@ -6,7 +6,13 @@ import { assertActiveAgentRuntimeAuthority } from "./agent-runtime-authority.js"
 import { respondInvalidCronParams } from "./cron-job-access.js";
 import type { GatewayRequestHandler, GatewayRequestHandlers } from "./types.js";
 
-const AUTHORITY_GUARDED_READS = new Set(["cron.list", "cron.get", "cron.runs", "cron.history"]);
+const AUTHORITY_GUARDED_READS = new Set([
+  "cron.list",
+  "cron.get",
+  "cron.runs",
+  "cron.history",
+  "cron.replay.prepareAdd",
+]);
 
 // The existing one-use grant is request-scoped; the original runtime identity
 // stays intact so deferred cron commits still fence the exact admitted run.

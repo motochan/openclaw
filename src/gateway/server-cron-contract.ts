@@ -1,9 +1,12 @@
+import type { CronReplayOutcome } from "../cron/replay.js";
 // Gateway cron contracts stay separate from the runtime so shared request
 // types do not pull scheduler implementation dependencies into their graph.
 import type { CronJobScratchState, CronJobScratchWriteResult } from "../cron/scratch-contract.js";
 import type { CronServiceContract } from "../cron/service-contract.js";
+import type { CronReplayControl } from "../cron/service/replay.js";
 
 export type GatewayCronServiceContract = CronServiceContract & {
+  replay(command: CronReplayControl, commitGuard: () => void): Promise<CronReplayOutcome>;
   /** Cancel exact current definitions under the serving scheduler's operation lock. */
   quiesceJobs(
     jobs: readonly { id: string; revision: string }[],

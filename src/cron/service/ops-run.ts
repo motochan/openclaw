@@ -10,9 +10,11 @@ import { runWithGatewayIndependentRootWorkContinuation } from "../../process/gat
 import { createDeferredCore } from "../../shared/deferred.js";
 import { setSafeTimeout } from "../../utils/timer-delay.js";
 import { captureCronRunAdmissionTracker } from "../mutation-completion.js";
+import { cronReplayRunId } from "../replay.js";
 import { normalizeCronRunErrorText } from "./execution-errors.js";
 import { locked } from "./locked.js";
 import { inspectManualRunPreflight } from "./ops-run-preparation.js";
+import { inspectCronReplay } from "./replay.js";
 import type { ManualRunOptions, OnExitRunOptions } from "./run-options.js";
 import {
   commitCronRunRequests,
@@ -33,6 +35,22 @@ async function requestManualCronRun(
   const tracking = { ...options, terminalTracker: options.terminalTracker ?? { emitted: false } };
   const result = await locked(state, async () => {
     const source = captureCronServiceMutationSource(state);
+    if (options.replay) {
+      const intent = options.replay.intent;
+      if (intent.action !== "run" || intent.jobId !== id || intent.mode !== (mode ?? "due")) {
+        throw new TypeError("cron replay intent does not match run");
+      }
+      const replay = await inspectCronReplay(state, options.replay, options.commitGuard);
+      if (replay.state === "not-applied") {
+        throw new TypeError("cron replay attempt is closed; reviewed retry required");
+      }
+      if (replay.state === "accepted") {
+        if (!("enqueued" in replay.result)) {
+          throw new TypeError("cron replay result is not a run");
+        }
+        return replay.result;
+      }
+    }
     const preflight = await inspectManualRunPreflight(state, id, source, mode, tracking);
     if (!preflight.ok || "reason" in preflight) {
       return preflight;
@@ -42,6 +60,15 @@ async function requestManualCronRun(
       mode,
       source: "manual",
     });
+    if (!requested && options.replay) {
+      const replay = await inspectCronReplay(state, options.replay, options.commitGuard);
+      if (replay.state === "accepted" && "enqueued" in replay.result) {
+        return replay.result;
+      }
+      if (replay.state === "not-applied") {
+        throw new TypeError("cron replay attempt is closed");
+      }
+    }
     return requested
       ? { requested }
       : ({
@@ -106,9 +133,14 @@ export async function enqueueRun(
   state: CronServiceState,
   id: string,
   mode?: CronRunMode,
-  opts?: Pick<ManualRunOptions, "commitGuard" | "event" | "onEventTransferred" | "runId">,
+  opts?: Pick<
+    ManualRunOptions,
+    "commitGuard" | "event" | "onEventTransferred" | "runId" | "replay"
+  >,
 ) {
-  const runId = opts?.runId ?? `cron-request.${randomUUID()}`;
+  const runId = opts?.replay
+    ? cronReplayRunId(captureCronServiceMutationSource(state).storeKey, opts.replay.ref)
+    : (opts?.runId ?? `cron-request.${randomUUID()}`);
   const releaseCaller = retainGatewayDeviceRevocation(opts?.commitGuard);
   const trackAdmission = captureCronRunAdmissionTracker();
   return runWithoutOwnedSessionTranscriptWrites(() =>

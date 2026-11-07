@@ -1,5 +1,6 @@
-/** Stateful CronService facade around the locked service operation helpers. */
 import type { CronEventRunOptions } from "./event-source.js";
+/** Stateful CronService facade around the locked service operation helpers. */
+import type { CronReplayRequest } from "./replay.js";
 import type {
   CronServiceContract,
   CronServiceRunOptions,
@@ -12,6 +13,7 @@ import * as mutationOps from "./service/ops-mutations.js";
 import * as readOps from "./service/ops-read.js";
 import * as runOps from "./service/ops-run.js";
 import * as streamOps from "./service/ops-stream.js";
+import { controlCronReplay, type CronReplayControl } from "./service/replay.js";
 import type { OnExitRunOptions } from "./service/run-options.js";
 import {
   type CronAddOptions,
@@ -174,10 +176,14 @@ export class CronService implements CronServiceContract {
     return await runOps.runOnExit(this.state, id, opts);
   }
 
+  async replay(command: CronReplayControl, commitGuard: () => void) {
+    return await controlCronReplay(this.state, command, commitGuard);
+  }
+
   async enqueueRun(
     id: string,
     mode?: CronRunMode,
-    opts?: { commitGuard?: () => void },
+    opts?: { commitGuard?: () => void; replay?: CronReplayRequest },
   ): Promise<CronServiceRunResult> {
     const result = await runOps.enqueueRun(this.state, id, mode, opts);
     if (result.ok && "runnable" in result) {

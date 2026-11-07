@@ -1,17 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { isAgentDeletionBlocked } from "../../agents/agent-lifecycle-registry.js";
 import type { EngineConnection } from "../../infra/sql-connection.js";
 import { assertTransactionUsable } from "../../infra/sqlite-transaction.js";
+import { requestSqliteWorkerOperationAdmission } from "../../infra/sqlite-worker-operation-admission.js";
 import { getSqliteWorkerStateContext } from "../../infra/sqlite-worker-state-context.js";
 import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contract.js";
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import { CronAgentDeletionBlockedError } from "../agent-availability.js";
 import { resolveCronJobConfigRevision } from "../config-revision.js";
+import type { CronReplayOutcome } from "../replay.js";
 import { cronSchedulingInputsEqual } from "../schedule-identity.js";
 import { findCronRunRecoveryInDatabase } from "../service/run-history-recovery.js";
+import type { CronAddResult } from "../service/state.js";
 import { planCronJobMutation, resolveCronJobMutationSnapshot } from "./job-mutations.worker.js";
 import { readCronJobNamesInDatabase } from "./job-name.kernel.js";
+import { inspectCronReplayInDatabase, acceptCronReplayInDatabase } from "./replay.kernel.js";
 import { loadedCronStoreFromRows, loadCronRows, updateCronRuntimeRow } from "./row-codec.js";
 import { recordSkippedCronRequestInDatabase } from "./run-history.kernel.js";
 import {
@@ -177,6 +182,31 @@ export function mutateCronJobsInWorker(
     return runOpenClawStateWriteTransaction(
       ({ db }) => {
         try {
+          if (input.replay) {
+            requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: undefined });
+            if (input.jobMutation.kind !== "add" || input.replay.intent.action !== "add") {
+              throw new TypeError("cron replay mutation must be an admitted add");
+            }
+            const prior = inspectCronReplayInDatabase(db, {
+              storeKey: input.storeKey,
+              replay: input.replay,
+            });
+            if (prior.state !== "prepared") {
+              const store = loadCronMutationStore(db, input.storeKey);
+              requestSqliteWorkerOperationAdmission({ stage: "commit", facts: undefined });
+              return {
+                outcome: {
+                  store,
+                  names: readCronJobNamesInDatabase(db, undefined, input.storeKey),
+                  changed: false,
+                  notifications: [],
+                  logs: [],
+                  replayOutcome: prior,
+                  replayed: true,
+                },
+              };
+            }
+          }
           const receiptSchema = prepareCronRunReceiptWriteSchema(db);
           const previous = loadCronMutationStore(db, input.storeKey);
           if (input.agentId !== undefined && isAgentDeletionBlocked(input.agentId, {}, db)) {
@@ -229,6 +259,31 @@ export function mutateCronJobsInWorker(
             hooks,
           );
           cancelChangedQueuedRuns(db, input, changes, previous.jobs, store, receiptSchema);
+          let replayOutcome: CronReplayOutcome | undefined;
+          if (input.replay) {
+            const job = store.jobs.find((entry) => entry.id === plan.job?.id);
+            if (!job || input.jobMutation.kind !== "add") {
+              throw new Error("cron replay add produced no committed job");
+            }
+            const existed = previous.jobs.some((entry) => entry.id === job.id);
+            const result: CronAddResult = normalizeOptionalString(
+              input.jobMutation.input.declarationKey,
+            )
+              ? {
+                  ...job,
+                  created: plan.created === true,
+                  ...(existed ? { updated: plan.updated === true } : {}),
+                  job,
+                }
+              : job;
+            acceptCronReplayInDatabase(
+              db,
+              { storeKey: input.storeKey, replay: input.replay },
+              result,
+            );
+            replayOutcome = { state: "accepted", result };
+            requestSqliteWorkerOperationAdmission({ stage: "commit", facts: undefined });
+          }
           return {
             outcome: {
               store,
@@ -236,6 +291,7 @@ export function mutateCronJobsInWorker(
               changed: changes.changedIds.size > 0,
               notifications: plan.notifications,
               logs: plan.logs,
+              ...(replayOutcome ? { replayOutcome } : {}),
             },
           };
         } catch (error) {

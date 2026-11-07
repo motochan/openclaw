@@ -36,8 +36,15 @@ const loadSchedulerActor = createLazyRuntimeModule(() => import("./scheduler-act
 let schedulerActor: typeof import("./scheduler-actor.worker.js") | undefined;
 const loadJobMutations = createLazyRuntimeModule(() => import("./job-mutations.worker.js"));
 let jobMutations: typeof import("./job-mutations.worker.js") | undefined;
+const loadReplay = createLazyRuntimeModule(() => import("./replay.worker.js"));
+let replay: typeof import("./replay.worker.js") | undefined;
 
 export function prepareCronStateWorkerCommand(type: PropertyKey): Promise<void> | undefined {
+  if (String(type).startsWith("cron.replay") && !replay) {
+    return loadReplay().then((loaded) => {
+      replay = loaded;
+    });
+  }
   if (String(type).startsWith("cron.scheduler") && !schedulerActor) {
     return loadSchedulerActor().then((loaded) => {
       schedulerActor = loaded;
@@ -115,6 +122,10 @@ export function isCronStateWorkerCommand(command: {
   input: unknown;
 }): command is SqliteWorkerCommand<CronStateWorkerOperations> {
   switch (command.type) {
+    case "cron.replayAdmit":
+    case "cron.replayInspect":
+    case "cron.replayClose":
+    case "cron.replayRetry":
     case "cron.schedulerStart":
     case "cron.schedulerTick":
     case "cron.schedulerRefresh":
@@ -153,6 +164,14 @@ export function executeCronStateCommand(
   database: OpenClawStateDatabase,
 ): CronStateWorkerOperations[keyof CronStateWorkerOperations]["output"] {
   switch (command.type) {
+    case "cron.replayAdmit":
+    case "cron.replayInspect":
+    case "cron.replayClose":
+    case "cron.replayRetry":
+      if (!replay) {
+        throw new Error("Cron replay worker is not prepared");
+      }
+      return replay.executeCronReplayInWorker(database, command);
     case "cron.schedulerStart":
     case "cron.schedulerTick":
     case "cron.schedulerRefresh":

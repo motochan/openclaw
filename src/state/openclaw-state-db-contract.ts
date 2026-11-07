@@ -44,6 +44,8 @@ export const FIRST_USE_STATE_TABLES = [
   "github_personal_publication_requests",
   "cron_job_runtime_authorities",
   "cron_run_trigger_state_retirements",
+  "cron_replay_effects",
+  "cron_replay_attempts",
   "execution_identity_contexts",
   "mcp_oauth_pending_authorizations",
   "node_worker_launch_containers",

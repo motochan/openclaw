@@ -439,6 +439,20 @@ function buildCronToolSchema(options?: CronToolSchemaOptions): TSchema {
       }),
       job: managementOnly ? Type.Optional(Type.Omit(job, ["declarationKey", "owner"])) : job,
       jobId: Type.Optional(Type.String()),
+      replay: Type.Optional(
+        Type.Object(
+          {
+            operationId: Type.String({ minLength: 1, maxLength: 256 }),
+            effectId: Type.String({ minLength: 1, maxLength: 256 }),
+            attempt: Type.Integer({ minimum: 1, maximum: 3 }),
+          },
+          {
+            additionalProperties: false,
+            description:
+              "Host-admitted identity required for agent add/run. Use the supplied IDs and attempt unchanged; never invent replacement IDs after an uncertain result.",
+          },
+        ),
+      ),
       id: Type.Optional(Type.String()),
       in: Type.Optional(
         Type.String({

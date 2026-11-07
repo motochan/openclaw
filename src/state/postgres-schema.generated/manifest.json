@@ -159,6 +159,28 @@
       "file": "fragment-cron_run_trigger_state_retirements.postgres.sql"
     },
     {
+      "id": "cron_replay_effects",
+      "tables": [
+        "cron_replay_effects"
+      ],
+      "indexes": [],
+      "dependencies": [],
+      "activation": "first-use",
+      "file": "fragment-cron_replay_effects.postgres.sql"
+    },
+    {
+      "id": "cron_replay_attempts",
+      "tables": [
+        "cron_replay_attempts"
+      ],
+      "indexes": [],
+      "dependencies": [
+        "cron_replay_effects"
+      ],
+      "activation": "first-use",
+      "file": "fragment-cron_replay_attempts.postgres.sql"
+    },
+    {
       "id": "execution_identity_contexts",
       "tables": [
         "execution_identity_contexts"

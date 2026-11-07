@@ -2,6 +2,7 @@ import {
   hasSqliteWorkerOutcomeUnknown,
   type SqliteWorkerCommand,
 } from "../../infra/sqlite-worker-contract.js";
+import { createSqliteWorkerWriteAdmission } from "../../infra/sqlite-worker-store.js";
 import type { OpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.types.js";
 import { runOpenClawStateWorkerOperation } from "../../state/openclaw-state-worker-store.js";
 import type {
@@ -17,6 +18,7 @@ type CronRuntimeMutationParams<Type extends CronRuntimeMutationType> = {
   input: CronRuntimeMutationContracts[Type]["input"];
   snapshot: CronRuntimeMutationContracts[Type]["snapshot"];
   assertCurrent: () => void;
+  requireCommitAdmission?: boolean;
   publish: (outcome: CronRuntimeMutationContracts[Type]["outcome"]) => void;
   onSettled?: (outcome: "committed" | "not-committed" | "unknown") => void;
   onRolledBackMutation?: (refusal: CronJobMutationRefusal) => never;
@@ -62,7 +64,12 @@ export async function runCronRuntimeMutation<Type extends CronRuntimeMutationTyp
           throw new Error("Cron mutation returned an unexpected refusal");
         }
       },
-      { assertCurrent },
+      {
+        assertCurrent,
+        createAdmission: params.requireCommitAdmission
+          ? createSqliteWorkerWriteAdmission(assertCurrent, [params.context.admission.databasePath])
+          : undefined,
+      },
     );
   } finally {
     params.onSettled?.(settled);

@@ -12,11 +12,13 @@ import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contra
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import { tryResolveCronJobEffectiveAgentId } from "../agent-id.js";
 import { resolveCronJobConfigRevision } from "../config-revision.js";
+import { cronReplayRunId } from "../replay.js";
 import { isJobEnabled, recomputeJobNextRunAtMs } from "../service/jobs-scheduling.js";
 import { retainManualOneShotOccurrence } from "../service/one-shot-schedule.js";
 import type { CronJob } from "../types.js";
 import { hasCanonicalCronDeliveryMode } from "./delivery-codec.js";
 import { readCronEventClaimInDatabase, transferCronEventInDatabase } from "./event-ingress.js";
+import { inspectCronReplayInDatabase, acceptCronReplayInDatabase } from "./replay.kernel.js";
 import { loadedCronStoreFromRows, loadCronRows, updateCronRuntimeRow } from "./row-codec.js";
 import { recordSkippedCronRequestInDatabase } from "./run-history.kernel.js";
 import type {
@@ -115,12 +117,14 @@ export function requestCronRunsInWorker(
 ): CronRunQueueOperations["cron.requestRuns"]["output"] {
   return runOpenClawStateWriteTransaction(
     ({ db }) => {
-      const hasEvents = input.requests.some((request) => request.event !== undefined);
-      if (hasEvents) {
+      const requiresAdmission = input.requests.some(
+        (request) => request.event !== undefined || request.replay !== undefined,
+      );
+      if (requiresAdmission) {
         requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: undefined });
       }
       const result = requestCronRunsInDatabase(db, input, loadJobs(db, input.storeKey));
-      if (hasEvents) {
+      if (requiresAdmission) {
         requestSqliteWorkerOperationAdmission({ stage: "commit", facts: undefined });
       }
       return result;
@@ -141,6 +145,26 @@ function requestCronRunsInDatabase(
     rejected: [],
   };
   for (const request of input.requests) {
+    if (request.replay) {
+      const { intent, ref } = request.replay;
+      if (
+        intent.action !== "run" ||
+        intent.jobId !== request.jobId ||
+        (intent.mode === "force" ? "force" : "if-enabled") !== request.mode ||
+        request.receiptId !== cronReplayRunId(input.storeKey, ref) ||
+        request.requestRunId !== request.receiptId
+      ) {
+        throw new TypeError("cron replay run does not match admitted intent");
+      }
+      const prior = inspectCronReplayInDatabase(db, {
+        storeKey: input.storeKey,
+        replay: request.replay,
+      });
+      if (prior.state !== "prepared") {
+        (result.replayed ??= []).push(prior);
+        continue;
+      }
+    }
     const job = jobs.get(request.jobId);
     const timed = parseCronScheduledRunId(request.receiptId);
     let reason: string | undefined;
@@ -242,6 +266,13 @@ function requestCronRunsInDatabase(
       updateCronRuntimeRow(db, input.storeKey, job, previousEnabled);
     }
     result.accepted.push({ job, runReceipt });
+    if (request.replay) {
+      acceptCronReplayInDatabase(
+        db,
+        { storeKey: input.storeKey, replay: request.replay },
+        { ok: true, enqueued: true, runId: request.requestRunId! },
+      );
+    }
   }
   return result;
 }

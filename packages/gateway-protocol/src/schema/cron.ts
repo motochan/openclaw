@@ -583,8 +583,59 @@ export const CronScratchSetResultSchema = Type.Union([
   }),
 ]);
 
+const CronReplayIdentitySchema = Type.String({
+  minLength: 1,
+  maxLength: 256,
+  pattern: "^\\S(?:[\\s\\S]*\\S)?$",
+});
+
+/** References a host-admitted logical effect; callers must not mint replacement IDs. */
+export const CronReplayRefSchema = closedObject({
+  operationId: CronReplayIdentitySchema,
+  effectId: CronReplayIdentitySchema,
+  attempt: Type.Integer({ minimum: 1, maximum: 3 }),
+});
+
+export const CronReplayIntentSchema = Type.Union([
+  closedObject({
+    action: Type.Literal("run"),
+    jobId: NonEmptyString,
+    mode: Type.Union([Type.Literal("due"), Type.Literal("force")]),
+  }),
+  closedObject({
+    action: Type.Literal("add"),
+    intentHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  }),
+]);
+
+const CronReplayControlFields = {
+  operationId: CronReplayIdentitySchema,
+  effectId: CronReplayIdentitySchema,
+  authorityId: CronReplayIdentitySchema,
+  intent: CronReplayIntentSchema,
+};
+const CronReplayEvidenceSchema = Type.String({ minLength: 1, maxLength: 4096, pattern: "\\S" });
+
+/** Administrator admission is distinct from execution of an admitted effect. */
+export const CronReplayAdmitParamsSchema = closedObject({
+  ...CronReplayControlFields,
+  maxAttempts: Type.Optional(Type.Integer({ minimum: 1, maximum: 3 })),
+  evidence: CronReplayEvidenceSchema,
+});
+export const CronReplayInspectParamsSchema = closedObject({
+  ...CronReplayControlFields,
+  attempt: Type.Integer({ minimum: 1, maximum: 3 }),
+});
+/** Closes an absent attempt at the scheduler transaction boundary. */
+export const CronReplayCloseParamsSchema = closedObject(CronReplayInspectParamsSchema.properties);
+export const CronReplayRetryParamsSchema = closedObject({
+  ...CronReplayInspectParamsSchema.properties,
+  evidence: CronReplayEvidenceSchema,
+});
+
 /** Creates a scheduled job with schedule, target, payload, and delivery policy. */
 export const CronAddParamsSchema = closedObject({
+  replay: Type.Optional(CronReplayRefSchema),
   name: NonEmptyString,
   declarationKey: Type.Optional(CronDeclarationKeySchema),
   displayName: Type.Optional(CronDisplayNameSchema),
@@ -656,6 +707,7 @@ export const CronRemoveParamsSchema = cronIdOrJobIdParams({});
 
 /** Runs a cron job immediately, immediately if enabled, or only if due. */
 export const CronRunParamsSchema = cronIdOrJobIdParams({
+  replay: Type.Optional(CronReplayRefSchema),
   mode: Type.Optional(
     Type.Union([Type.Literal("due"), Type.Literal("force"), Type.Literal("if-enabled")]),
   ),

@@ -207,6 +207,8 @@ ACTIONS: status | list (summaries; follow nextOffset) | get jobId (full details)
 
 SCOPE: Authenticated configured channel owners and Control UI administrators can manage any Gateway automation. Other turns see caller-visible jobs and scoped counts only: an empty list or failed list/get/update/remove (including not-found) does not establish global absence, even for IDs from your history. Never recreate or replace a known automation for update/remove/reconciliation based on these results; report the visibility limit and ask an authorized administrator to check through a fresh authenticated owner/administrator turn or the Automations page. New requested automations may still be created.
 
+REPLAY: Agent add/run requires replay:{operationId,effectId,attempt} supplied by a host admission. Preserve that identity across retries. Never invent replacement IDs or advance attempts after an uncertain result; request reconciliation.
+
 ADD: job requires schedule+payload.
 
 SCHEDULE:
@@ -251,7 +253,7 @@ export function createCronTool(opts?: CronToolOptions, deps?: CronToolDeps): Any
         ? "Inspect or remove only the current automation. Actions: list [includeDisabled], get jobId, remove jobId. Use the current job ID; other jobs and management actions are unavailable."
         : 'Inspect or remove only the current automation. Actions: status; list [includeDisabled]; get/runs/remove jobId; next_check in:"15m" for this paced run or at + agentTurn + explicit session:<key> continuation. A successful one-shot proposal rearms the same job from run end (minimum 2s); without one it completes normally. Use the current job ID. To stop a finished job, remove it; creating/updating/running jobs and waking sessions are unavailable. Return the task result; the scheduler owns delivery.'
       : managementAuthority?.managementOnly
-        ? 'Manage any existing automation on this Gateway with the admitted automation management authority. Actions: list [includeDisabled,limit,offset] (compact summaries with timing; follow nextOffset); get jobId (full schedule, payload, and delivery details); update jobId job (partial patch, null clears); run jobId (runMode:"force" runs now; waits up to timeoutMs, default 60s, and returns the finished run, or its runId if still running); remove jobId (operator removal requests cancellation of an active run; the result reports activeRunCancellationRequested:true). Creator attribution and scheduled execution policy stay intact. Use the Automations page for other actions.'
+        ? 'Manage any existing automation on this Gateway with the admitted automation management authority. Actions: list [includeDisabled,limit,offset] (compact summaries with timing; follow nextOffset); get jobId (full schedule, payload, and delivery details); update jobId job (partial patch, null clears); run jobId (runMode:"force" runs now; waits up to timeoutMs, default 60s, and returns the finished run, or its runId if still running); remove jobId (operator removal requests cancellation of an active run; the result reports activeRunCancellationRequested:true). Run requires host-admitted replay:{operationId,effectId,attempt}; never invent replacement IDs after an uncertain result. Creator attribution and scheduled execution policy stay intact. Use the Automations page for other actions.'
         : buildCronToolDescription({ triggersEnabled }),
     outputSchema: CronToolOutputSchema,
     parameters: createCronToolSchema({
@@ -567,7 +569,11 @@ export function createCronTool(opts?: CronToolOptions, deps?: CronToolDeps): Any
             }
             return jsonResult(
               await withCreatorAuthorityProvenance(resolvedAuthority, () =>
-                callGateway("cron.add", gatewayOpts, job),
+                callGateway(
+                  "cron.add",
+                  gatewayOpts,
+                  params.replay === undefined ? job : { ...job, replay: params.replay },
+                ),
               ),
             );
           }
@@ -629,6 +635,7 @@ export function createCronTool(opts?: CronToolOptions, deps?: CronToolDeps): Any
           }
           case "run": {
             const id = requireCronJobIdParam(params);
+            const replay = params.replay === undefined ? {} : { replay: params.replay };
             const runMode =
               params.runMode === "due" || params.runMode === "force" ? params.runMode : "due";
             // The Gateway holds the request until the run records its outcome, so the model
@@ -642,14 +649,14 @@ export function createCronTool(opts?: CronToolOptions, deps?: CronToolDeps): Any
               result = await callGateway(
                 "cron.run",
                 { ...gatewayOpts, timeoutMs: waitTimeoutMs + CRON_RUN_ENQUEUE_TIMEOUT_MS },
-                { id, mode: runMode, waitTimeoutMs },
+                { id, mode: runMode, waitTimeoutMs, ...replay },
               );
             } catch (error) {
               // Shipped Gateways reject the param before enqueueing, so retrying cannot double-run.
               if (!isOlderGatewayRejectingParam(error, "cron.run", "waitTimeoutMs")) {
                 throw error;
               }
-              result = await callGateway("cron.run", gatewayOpts, { id, mode: runMode });
+              result = await callGateway("cron.run", gatewayOpts, { id, mode: runMode, ...replay });
             }
             if (result.enqueued !== true || result.run) {
               return jsonResult(result);

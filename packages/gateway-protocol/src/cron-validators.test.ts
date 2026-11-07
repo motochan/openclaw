@@ -8,6 +8,10 @@ import {
   validateCronListParams,
   validateCronRemoveParams,
   validateCronRunParams,
+  validateCronReplayAdmitParams,
+  validateCronReplayInspectParams,
+  validateCronReplayCloseParams,
+  validateCronReplayRetryParams,
   validateCronRunsParams,
   validateCronUpdateParams,
 } from "./index.js";
@@ -44,6 +48,50 @@ function expectCases(
 }
 
 describe("cron protocol validators", () => {
+  it("accepts only complete bounded replay identities on add and run", () => {
+    const replay = { operationId: "operation-1", effectId: "step-1", attempt: 1 };
+    expectCases(validateCronAddParams, true, [add({ replay })]);
+    expectCases(validateCronRunParams, true, [{ id: "job-1", replay }]);
+    for (const invalid of [
+      { ...replay, attempt: 0 },
+      { ...replay, attempt: 4 },
+      { ...replay, attempt: "1" },
+      { ...replay, effectId: " " },
+      { ...replay, operationId: " operation-1" },
+      { ...replay, authorityId: "forged" },
+      { operationId: "operation-1", attempt: 1 },
+    ]) {
+      expectCases(validateCronAddParams, false, [add({ replay: invalid })]);
+      expectCases(validateCronRunParams, false, [{ id: "job-1", replay: invalid }]);
+    }
+  });
+
+  it("validates replay control intent and explicit review evidence", () => {
+    const admission = {
+      operationId: "operation-1",
+      effectId: "step-1",
+      authorityId: "agent:fixture",
+      intent: { action: "run", jobId: "job-1", mode: "force" },
+      evidence: "review-1",
+    };
+    expectCases(validateCronReplayAdmitParams, true, [
+      admission,
+      { ...admission, intent: { action: "add", intentHash: "a".repeat(64) } },
+    ]);
+    expectCases(validateCronReplayAdmitParams, false, [
+      { ...admission, evidence: "" },
+      { ...admission, maxAttempts: 4 },
+      { ...admission, intent: { action: "remove", jobId: "job-1" } },
+    ]);
+    const { evidence: _, ...identity } = admission;
+    const request = { ...identity, attempt: 1 };
+    expect(validateCronReplayInspectParams(request)).toBe(true);
+    expect(validateCronReplayCloseParams(request)).toBe(true);
+    expect(validateCronReplayRetryParams(request)).toBe(false);
+    expect(validateCronReplayRetryParams({ ...request, attempt: 2, evidence: "review-2" })).toBe(
+      true,
+    );
+  });
   it("reports auto-disable state without accepting it in writable patches", () => {
     const job = {
       ...minimalAddParams,

@@ -126,7 +126,10 @@ export function normalizeCronAddRequest(params: unknown): {
   });
   normalizeCronRequestDeliveryMode(normalized);
   return {
-    candidate: normalized ?? params,
+    candidate:
+      normalized && rawParams && Object.hasOwn(rawParams, "replay")
+        ? { ...normalized, replay: rawParams.replay }
+        : (normalized ?? params),
     enabledExplicit: parsedEnabled !== undefined,
   };
 }

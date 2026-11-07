@@ -257,6 +257,7 @@ export function createLazyGatewayCronState(
     status: bindCron(({ state }) => state.cron.status.bind(state.cron)),
     list: bindCron(({ state }) => state.cron.list.bind(state.cron)),
     listPage: bindCron(({ state }) => state.cron.listPage.bind(state.cron)),
+    replay: bindCron(({ state }) => state.cron.replay.bind(state.cron)),
     add: bindCron(({ state }) => state.cron.add.bind(state.cron)),
     update: bindCron(({ state }) => state.cron.update.bind(state.cron)),
     updateWithPrecondition: bindCron(({ state }) =>

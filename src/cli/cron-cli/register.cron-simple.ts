@@ -13,6 +13,7 @@ import { parseTimeoutMs } from "../parse-timeout.js";
 import { CronCliError } from "./cron-cli-error.js";
 import { findCronJobByIdOrName } from "./list-jobs.js";
 import { createCronOutputCommand } from "./output-mode.js";
+import { parseCronReplayOptions } from "./replay-options.js";
 import {
   enrichCronJsonWithStatus,
   formatCronLookupMiss,
@@ -220,6 +221,9 @@ export function registerCronSimpleCommands(cron: Command) {
     createCronOutputCommand(cron, "run")
       .description("Run an automation now (debug)")
       .argument("<id>", "Job id")
+      .option("--operation-id <id>", "Operation ID from a host replay admission")
+      .option("--effect-id <id>", "Effect ID from the same host admission")
+      .option("--attempt <number>", "Reviewed attempt number (defaults to 1 with replay IDs)")
       .option("--due", "Run only when due (default behavior in older versions)", false)
       .option("--wait", "Wait for the queued run to finish", false)
       .option(
@@ -235,6 +239,7 @@ export function registerCronSimpleCommands(cron: Command) {
       .action(async (idArg, opts, command) => {
         try {
           const id = requireCronJobId(idArg);
+          const replay = parseCronReplayOptions(opts);
           let waitTimeoutMs = 0;
           let pollIntervalMs = 0;
           if (opts.wait) {
@@ -250,6 +255,7 @@ export function registerCronSimpleCommands(cron: Command) {
           const res = await callGatewayFromCli("cron.run", opts, {
             id,
             mode: opts.due ? "due" : "force",
+            ...(replay ? { replay } : {}),
           });
           const result = res as CronRunCommandResult | undefined;
           if (opts.wait && result?.ok && result.enqueued) {

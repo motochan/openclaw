@@ -1,5 +1,6 @@
 import type { CronStoreWorkerOperations } from "./load-worker.types.js";
 import type { CronQuarantineRegistration } from "./quarantine.kernel.js";
+import type { CronReplayWorkerOperations } from "./replay.types.js";
 import type { CronRunHistoryWorkerOperations } from "./run-history.types.js";
 import type { CronRunQueueOperations } from "./run-queue.types.js";
 import type { CronRunRecoveryInput, CronRunRecoveryOutcome } from "./run-recovery.types.js";
@@ -11,6 +12,7 @@ export type CronStateWorkerOperations = CronRunHistoryWorkerOperations &
   CronStoreWorkerOperations &
   CronRuntimeWorkerOperations &
   CronRunQueueOperations &
+  CronReplayWorkerOperations &
   CronSchedulerOperations &
   CronStoreSaveWorkerOperations & {
     "cron.bindReceiptExecution": {

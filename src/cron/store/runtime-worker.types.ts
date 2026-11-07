@@ -1,4 +1,5 @@
 import type { CronConfig } from "../../config/types.cron.js";
+import type { CronReplayRequest, CronReplayOutcome } from "../replay.js";
 import type { CronJobScratchWriteInput, CronJobScratchWriteOutcome } from "../scratch-contract.js";
 import type {
   CronNotificationIntent,
@@ -80,6 +81,7 @@ export type CronRuntimeMutationInputs = {
   "cron.writeScratch": CronJobScratchWriteInput & { createdAtMsFallback?: number };
   "cron.mutateJobs": {
     storeKey: string;
+    replay?: CronReplayRequest;
     jobMutation: CronJobMutation;
     expectedJob?: { id: string; configRevision: string };
     preconditionJob?: CronJob;
@@ -197,6 +199,8 @@ export type CronRuntimeMutationContracts = {
       changed: boolean;
       notifications: CronNotificationIntent[];
       logs: CronRunRecoveryOutcome["logs"];
+      replayOutcome?: CronReplayOutcome;
+      replayed?: boolean;
     };
   };
   "cron.maintainHistory": {

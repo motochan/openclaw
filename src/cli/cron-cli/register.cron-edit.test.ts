@@ -52,6 +52,28 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("cron edit", () => {
+  it("forwards the reviewed retry identity when creating a job", async () => {
+    await run([
+      ...addArgs,
+      "--every",
+      "1h",
+      "--message",
+      "fixture task",
+      "--operation-id",
+      "operation-1",
+      "--effect-id",
+      "step-1",
+      "--attempt",
+      "2",
+    ]);
+    expect(callGatewayFromCli).toHaveBeenCalledWith(
+      "cron.add",
+      expect.anything(),
+      expect.objectContaining({
+        replay: { operationId: "operation-1", effectId: "step-1", attempt: 2 },
+      }),
+    );
+  });
   it.each([
     [["--enable", "--json"], { enabled: true }],
     [["--clear-display-name"], { displayName: null }],

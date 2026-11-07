@@ -1,4 +1,5 @@
 import type { CronEventAdmission } from "../event-source.js";
+import type { CronReplayRequest } from "../replay.js";
 import type { CronRunReceiptHandle } from "../store/run-receipt.types.js";
 import type { CronJob, CronPayload } from "../types.js";
 
@@ -11,6 +12,7 @@ export type OnExitRunOptions = {
 };
 
 export type ManualRunOptions = {
+  replay?: CronReplayRequest;
   event?: CronEventAdmission;
   onEventTransferred?: (receipt: CronRunReceiptHandle) => void;
   onExit?: OnExitRunOptions;

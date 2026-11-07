@@ -5,6 +5,7 @@ import {
 } from "../active-jobs.js";
 import { resolveCronJobEffectiveAgentId } from "../agent-id.js";
 import { resolveCronJobConfigRevision } from "../config-revision.js";
+import type { CronReplayRequest } from "../replay.js";
 import { cronSchedulingInputsEqual } from "../schedule-identity.js";
 import type { CronJobMutation, CronJobMutationSnapshot } from "../store/job-mutations.types.js";
 import {
@@ -22,6 +23,7 @@ import { emit, type CronServiceState } from "./state.js";
 import { persistCronJobMutation, type captureCronJobMutationSource } from "./store.js";
 
 export async function persistUpdatedJob(params: {
+  replay?: CronReplayRequest;
   state: CronServiceState;
   previousJob: CronStoredJob;
   nextJob: CronStoredJob;
@@ -60,6 +62,7 @@ export async function persistUpdatedJob(params: {
         resolveCronAuthenticatedCallerOrigin(nextJob),
       ));
   await persistCronJobMutation({
+    replay: params.replay,
     state,
     source: params.source,
     method: params.mutationMethod,

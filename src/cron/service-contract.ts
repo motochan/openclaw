@@ -4,6 +4,7 @@ import type {
   CronEventRunResult,
   CronEventSourceSnapshot,
 } from "./event-source.js";
+import type { CronReplayRequest } from "./replay.js";
 import type { CronListPageOptions, CronListPageResult } from "./service/list-page-types.js";
 import type {
   CronAddInput,
@@ -71,7 +72,7 @@ export interface CronServiceContract {
   enqueueRun(
     id: string,
     mode?: CronRunMode,
-    opts?: CronCommitGuardOptions,
+    opts?: CronCommitGuardOptions & { replay?: CronReplayRequest },
   ): Promise<CronServiceRunResult>;
   getJob(id: string): CronJob | undefined;
   readJob(id: string): Promise<CronJob | undefined>;

@@ -66,6 +66,26 @@ afterEach(() => {
 });
 
 describe("cron output routing", () => {
+  it("forwards admitted replay identity on a manual run", async () => {
+    callGatewayFromCli.mockResolvedValueOnce({ ok: true, enqueued: true, runId: "run-1" });
+    await expect(
+      run(["run", "job-1", "--operation-id", "operation-1", "--effect-id", "step-1"]),
+    ).rejects.toMatchObject({ name: "ExitError", code: 0 });
+    expect(callGatewayFromCli).toHaveBeenCalledWith("cron.run", expect.anything(), {
+      id: "job-1",
+      mode: "force",
+      replay: { operationId: "operation-1", effectId: "step-1", attempt: 1 },
+    });
+  });
+
+  it.each([
+    ["--operation-id", "operation-1"],
+    ["--attempt", "2"],
+    ["--operation-id", "operation-1", "--effect-id", "step-1", "--attempt", "4"],
+  ])("rejects incomplete or out-of-budget replay options before RPC: %j", async (...flags) => {
+    await expect(run(["run", "job-1", ...flags])).rejects.toThrow();
+    expect(callGatewayFromCli).not.toHaveBeenCalled();
+  });
   it("inherits parent Gateway options without losing JSON mode", async () => {
     const program = new Command().name("openclaw");
     registerCronCli(program);

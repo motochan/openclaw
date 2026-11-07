@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../../config/config.js";
+import { GatewayClientRequestError } from "../../gateway/client.js";
 
 const { callGatewayMock, extractDeliveryInfoMock } = vi.hoisted(() => ({
   callGatewayMock: vi.fn(),
@@ -452,6 +453,52 @@ describe("cron tool", () => {
       mode: "force",
       waitTimeoutMs: 60_000,
     });
+  });
+
+  it("preserves replay identity when an older Gateway rejects only the wait option", async () => {
+    const replay = { operationId: "operation-1", effectId: "step-1", attempt: 2 };
+    callGatewayMock
+      .mockRejectedValueOnce(
+        new GatewayClientRequestError({
+          code: "INVALID_REQUEST",
+          message: "invalid cron.run params: unexpected property 'waitTimeoutMs'",
+        }),
+      )
+      .mockResolvedValueOnce({ ok: true, enqueued: true, runId: "run-1" });
+    await executeCron({ action: "run", jobId: "job-1", runMode: "force", replay });
+    expect(readGatewayCall(0).params).toMatchObject({ replay, waitTimeoutMs: 60_000 });
+    expect(readGatewayCall(1).params).toEqual({ id: "job-1", mode: "force", replay });
+  });
+
+  it("does not remove replay identity to retry an incompatible Gateway", async () => {
+    callGatewayMock.mockRejectedValueOnce(
+      new GatewayClientRequestError({
+        code: "INVALID_REQUEST",
+        message: "invalid cron.run params: unexpected property 'replay'",
+      }),
+    );
+    await expect(
+      executeCron({
+        action: "run",
+        jobId: "job-1",
+        replay: { operationId: "operation-1", effectId: "step-1", attempt: 1 },
+      }),
+    ).rejects.toThrow("unexpected property 'replay'");
+    expect(callGatewayMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards top-level replay identity after normalizing add shorthand", async () => {
+    const replay = { operationId: "operation-1", effectId: "step-1", attempt: 1 };
+    await executeCron({
+      action: "add",
+      replay,
+      job: {
+        name: "fixture",
+        schedule: { everyMs: 60_000 },
+        payload: { kind: "systemEvent", text: "fixture event" },
+      },
+    });
+    expect(expectSingleGatewayCallMethod("cron.add")).toMatchObject({ replay });
   });
 
   it("caps the run wait so one call cannot hold the turn past ten minutes", async () => {

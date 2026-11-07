@@ -1469,6 +1469,34 @@ CREATE INDEX IF NOT EXISTS idx_cron_jobs_store_order
 
 -- One owner-native receipt is also the durable execution fence. Receipts
 -- survive job deletion so operators can distinguish a run from log inference.
+-- Replay admission outlives bounded execution-history receipts. No automatic pruning.
+CREATE TABLE IF NOT EXISTS cron_replay_effects (
+  store_key TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  effect_id TEXT NOT NULL,
+  binding_json TEXT NOT NULL,
+  max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 3),
+  admission_evidence TEXT NOT NULL,
+  admitted_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (store_key, operation_id, effect_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS cron_replay_attempts (
+  store_key TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  effect_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK (attempt BETWEEN 1 AND 3),
+  grant_evidence TEXT NOT NULL,
+  granted_at_ms INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('prepared', 'accepted', 'not-applied')),
+  result_json TEXT,
+  PRIMARY KEY (store_key, operation_id, effect_id, attempt),
+  FOREIGN KEY (store_key, operation_id, effect_id)
+    REFERENCES cron_replay_effects(store_key, operation_id, effect_id),
+  CHECK ((state = 'accepted' AND result_json IS NOT NULL) OR
+    (state != 'accepted' AND result_json IS NULL))
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS cron_run_receipts (
   cursor_id INTEGER NOT NULL,
   receipt_id TEXT PRIMARY KEY,

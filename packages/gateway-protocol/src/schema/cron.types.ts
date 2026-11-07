@@ -12,6 +12,11 @@ import type {
   CronRemoveParamsSchema,
   CronRunLogEntrySchema,
   CronRunParamsSchema,
+  CronReplayRefSchema,
+  CronReplayAdmitParamsSchema,
+  CronReplayInspectParamsSchema,
+  CronReplayCloseParamsSchema,
+  CronReplayRetryParamsSchema,
   CronRunsParamsSchema,
   CronScratchGetParamsSchema,
   CronScratchGetResultSchema,
@@ -60,6 +65,11 @@ export type CronDeclarativeAddResult = Static<typeof CronDeclarativeAddResultSch
 export type CronUpdateParams = Static<typeof CronUpdateParamsSchema>;
 export type CronRemoveParams = Static<typeof CronRemoveParamsSchema>;
 export type CronRunParams = Static<typeof CronRunParamsSchema>;
+export type CronReplayRef = Static<typeof CronReplayRefSchema>;
+export type CronReplayAdmitParams = Static<typeof CronReplayAdmitParamsSchema>;
+export type CronReplayInspectParams = Static<typeof CronReplayInspectParamsSchema>;
+export type CronReplayCloseParams = Static<typeof CronReplayCloseParamsSchema>;
+export type CronReplayRetryParams = Static<typeof CronReplayRetryParamsSchema>;
 export type CronRunsParams = Static<typeof CronRunsParamsSchema>;
 export type CronScratchGetParams = Static<typeof CronScratchGetParamsSchema>;
 export type CronScratchGetResult = Static<typeof CronScratchGetResultSchema>;

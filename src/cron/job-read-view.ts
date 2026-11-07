@@ -18,7 +18,7 @@ export function cronScratchReadView(
 
 export function cronAddResultReadView(params: {
   result: CronJob | { created: boolean; updated?: boolean; job: CronJob };
-  deliveryPreview: CronDeliveryPreview;
+  deliveryPreview?: CronDeliveryPreview;
 }) {
   const job = "job" in params.result ? params.result.job : params.result;
   if ("job" in params.result) {
@@ -26,12 +26,12 @@ export function cronAddResultReadView(params: {
       created: params.result.created,
       ...(params.result.updated === undefined ? {} : { updated: params.result.updated }),
       job: cronJobReadView(job),
-      deliveryPreview: params.deliveryPreview,
+      ...(params.deliveryPreview ? { deliveryPreview: params.deliveryPreview } : {}),
     };
   }
   return {
     ...cronJobReadView(job),
-    deliveryPreview: params.deliveryPreview,
+    ...(params.deliveryPreview ? { deliveryPreview: params.deliveryPreview } : {}),
   };
 }
 

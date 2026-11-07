@@ -17,6 +17,7 @@ import {
   resolveCronDeliveryPreview,
 } from "../../cron/delivery-preview.js";
 import { cronAddResultReadView, cronJobReadView } from "../../cron/job-read-view.js";
+import { cronReplayIntentHash, type CronReplayRef } from "../../cron/replay.js";
 import type { CronUpdateOptions } from "../../cron/service/state.js";
 import { isInvalidCronSessionTargetIdError } from "../../cron/session-target.js";
 import { cronJobUsesToolRuntime } from "../../cron/tools-allow.js";
@@ -70,6 +71,12 @@ import {
   scopedCronJobHandler,
 } from "./cron-job-access.js";
 import { cronListHandler } from "./cron-list.js";
+import {
+  cronReplayHandlers,
+  cronReplayRequest,
+  inspectCronReplayForCaller,
+  wrapCronRunReplay,
+} from "./cron-replay.js";
 import { cronRunsHandler } from "./cron-runs.js";
 import { wrapCronHandlersWithRuntimeAuthority } from "./cron-runtime-authority.js";
 import { cronScratchHandlers } from "./cron-scratch.js";
@@ -98,6 +105,7 @@ export const cronHandlers: GatewayRequestHandlers = {
     },
   ),
   ...cronScratchHandlers,
+  ...cronReplayHandlers,
   "cron.add": async ({
     params,
     respond,
@@ -119,12 +127,18 @@ export const cronHandlers: GatewayRequestHandlers = {
       return;
     }
     const callerScope = readCronCallerScope(client);
-    const jobCreate = applyCronCreateCallerScopeDefault(candidate as CronJobCreate, callerScope);
-    let capture: ReturnType<typeof resolveCronCreatorAuthorityCapture>;
+    const { replay: replayRef, ...createParams } = candidate as CronJobCreate & {
+      replay?: CronReplayRef;
+    };
+    const jobCreate = applyCronCreateCallerScopeDefault(createParams, callerScope);
+    let replay: ReturnType<typeof cronReplayRequest>;
     try {
-      capture = resolveCronCreatorAuthorityCapture(callerScope);
-    } catch (err) {
-      respondInvalidCronParams(respond, "cron.add", formatErrorMessage(err));
+      replay = cronReplayRequest(client, replayRef, {
+        action: "add",
+        intentHash: cronReplayIntentHash({ input: jobCreate, enabledExplicit }),
+      });
+    } catch (error) {
+      respondInvalidCronParams(respond, "cron.add", formatErrorMessage(error));
       return;
     }
     const assertMutationCurrent = resolveCronMutationCommitGuard(client, context, undefined, {
@@ -140,6 +154,31 @@ export const cronHandlers: GatewayRequestHandlers = {
       })
     ) {
       respondInvalidCronParams(respond, "cron.add", "job agentId outside caller scope");
+      return;
+    }
+    if (replay) {
+      try {
+        const receipt = await inspectCronReplayForCaller(
+          { client, context, signal, hasCurrentClientAuthority },
+          replay,
+        );
+        if (receipt.state === "accepted") {
+          if ("enqueued" in receipt.result) {
+            throw new TypeError("cron replay result is not an add");
+          }
+          respond(true, cronAddResultReadView({ result: receipt.result }), undefined);
+          return;
+        }
+      } catch (error) {
+        respondInvalidCronParams(respond, "cron.add", formatErrorMessage(error));
+        return;
+      }
+    }
+    let capture: ReturnType<typeof resolveCronCreatorAuthorityCapture>;
+    try {
+      capture = resolveCronCreatorAuthorityCapture(callerScope);
+    } catch (err) {
+      respondInvalidCronParams(respond, "cron.add", formatErrorMessage(err));
       return;
     }
     if (requiresExplicitAgentRuntimeToolsAllow({ job: jobCreate, callerScope })) {
@@ -201,6 +240,7 @@ export const cronHandlers: GatewayRequestHandlers = {
         job: { ...jobCreate, sourceConversation: creatorOptions.sourceConversation },
       });
       result = await context.cron.add(jobCreate, {
+        ...(replay ? { replay } : {}),
         enabledExplicit,
         ...creatorOptions,
         commitGuard,
@@ -247,8 +287,9 @@ export const cronHandlers: GatewayRequestHandlers = {
       true,
       cronAddResultReadView({
         result,
-        deliveryPreview:
-          "job" in result && !result.created
+        deliveryPreview: replay
+          ? undefined
+          : "job" in result && !result.created
             ? await resolveCronDeliveryPreview({ ...previewContext, job })
             : deliveryPreview,
       }),
@@ -581,9 +622,21 @@ export const cronHandlers: GatewayRequestHandlers = {
           { callerScope, jobId },
           { sessionMutationCommitGuard, hasCurrentClientAuthority },
         );
-        result = commitGuard
-          ? await context.cron.enqueueRun(jobId, p.mode ?? "force", { commitGuard })
-          : await context.cron.enqueueRun(jobId, p.mode ?? "force");
+        if (p.replay && p.mode === "if-enabled") {
+          throw new TypeError("cron replay supports due or force run mode");
+        }
+        const replay = cronReplayRequest(client, p.replay, {
+          action: "run",
+          jobId,
+          mode: p.mode === "due" ? "due" : "force",
+        });
+        result =
+          replay || commitGuard
+            ? await context.cron.enqueueRun(jobId, p.mode ?? "force", {
+                commitGuard,
+                ...(replay ? { replay } : {}),
+              })
+            : await context.cron.enqueueRun(jobId, p.mode ?? "force");
       } catch (error) {
         if (error instanceof TypeError) {
           respondInvalidCronParams(respond, "cron.run", formatErrorMessage(error));
@@ -652,4 +705,5 @@ export const cronHandlers: GatewayRequestHandlers = {
   "cron.runs": cronRunsHandler,
 };
 
+wrapCronRunReplay(cronHandlers);
 wrapCronHandlersWithRuntimeAuthority(cronHandlers);

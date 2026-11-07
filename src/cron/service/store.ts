@@ -6,6 +6,7 @@ import { describeUnavailableCronAgent } from "../agent-availability.js";
 import { captureCronMutationCommit } from "../mutation-completion.js";
 import { normalizeCronJobInput } from "../normalize.js";
 import { getInvalidPersistedCronJobReason } from "../persisted-shape.js";
+import type { CronReplayOutcome, CronReplayRequest } from "../replay.js";
 import { isInvalidCronSessionTargetIdError } from "../session-target.js";
 import {
   getCronJobsStoreRevision,
@@ -386,6 +387,7 @@ export async function prepareCronJobMutation(
 
 /** Publish a private CRUD draft only after its job and receipt transaction is known committed. */
 export async function persistCronJobMutation(params: {
+  replay?: CronReplayRequest;
   state: CronServiceState;
   source: ReturnType<typeof captureCronServiceMutationSource>;
   method: "cron.add" | "cron.update" | "cron.remove";
@@ -399,10 +401,11 @@ export async function persistCronJobMutation(params: {
   suppressScheduledJobId?: string;
   jobMutation: CronJobMutation;
   jobMutationSnapshot: CronJobMutationSnapshot;
-}): Promise<void> {
+}): Promise<CronReplayOutcome | undefined> {
   const { state, source } = params;
   const observedRevision = getCronJobsStoreRevision(source.storeKey);
   const markCommitted = captureCronMutationCommit(params.method);
+  let replayOutcome: CronReplayOutcome | undefined;
   let published = false;
   let notifications: DeferredCronNotifications = [];
   const assertCurrent = () => {
@@ -421,6 +424,7 @@ export async function persistCronJobMutation(params: {
     type: "cron.mutateJobs",
     input: structuredClone({
       storeKey: source.storeKey,
+      replay: params.replay,
       agentId: params.agentId,
       preconditionJob: params.preconditionJob,
       expectedJob: params.expectedJob,
@@ -428,9 +432,19 @@ export async function persistCronJobMutation(params: {
       jobMutation: params.jobMutation,
     }),
     assertCurrent,
+    requireCommitAdmission: Boolean(params.replay),
     // Config availability may change after dispatch; deletion is checked against worker rows.
     snapshot: params.jobMutationSnapshot,
-    publish({ store, names, changed, notifications: committedNotifications, logs }) {
+    publish({
+      store,
+      names,
+      changed,
+      notifications: committedNotifications,
+      logs,
+      replayOutcome: replayResult,
+      replayed,
+    }) {
+      replayOutcome = replayResult;
       published = true;
       notifications = committedNotifications;
       for (const entry of logs) {
@@ -454,6 +468,9 @@ export async function persistCronJobMutation(params: {
       loadedCronStoreRevisions.set(state, {
         revision: unchanged ? getCronJobsStoreRevision(source.storeKey) : -1,
       });
+      if (replayed) {
+        return;
+      }
       try {
         params.afterCommit?.();
       } finally {
@@ -481,4 +498,5 @@ export async function persistCronJobMutation(params: {
     },
   });
   await runPostPersistCronNotifications(state, notifications);
+  return replayOutcome;
 }

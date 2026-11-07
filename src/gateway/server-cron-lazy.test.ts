@@ -483,6 +483,7 @@ function createCronState(cron: GatewayCronServiceContract): GatewayCronState {
 
 function createCronService(): GatewayCronServiceContract {
   return {
+    replay: vi.fn(async () => ({ state: "prepared" as const })),
     start: vi.fn(async () => undefined),
     stop: vi.fn(),
     pauseScheduling: vi.fn(),

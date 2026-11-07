@@ -11,6 +11,7 @@ import {
 } from "../active-jobs.js";
 import { resolveCronJobEffectiveAgentId, tryResolveCronJobEffectiveAgentId } from "../agent-id.js";
 import { resolveCronJobConfigRevision } from "../config-revision.js";
+import { cronReplayIntentHash } from "../replay.js";
 import { normalizeCronRunJobId } from "../run-history.js";
 import { removeCronJobBaseSession } from "../session-reaper.js";
 import { removeStaleCronJobFamilyRows } from "../store.js";
@@ -38,6 +39,7 @@ import {
 } from "./locked.js";
 import { normalizeOptionalAgentId } from "./normalize.js";
 import { resolveCurrentDefaultAgentId } from "./ops-shared.js";
+import { inspectCronReplay } from "./replay.js";
 import { captureCronSchedulerSnapshot } from "./scheduler-config.js";
 import type {
   CronAddOptions,
@@ -90,6 +92,25 @@ export async function add(
   let pendingSessionCleanup: Promise<void> | undefined;
   return await locked(state, async () => {
     source.assertCurrent();
+    if (opts?.replay) {
+      if (
+        opts.replay.intent.action !== "add" ||
+        opts.replay.intent.intentHash !==
+          cronReplayIntentHash({ input, enabledExplicit: opts.enabledExplicit === true })
+      ) {
+        throw new TypeError("cron replay intent does not match add");
+      }
+      const replay = await inspectCronReplay(state, opts.replay, opts.commitGuard);
+      if (replay.state === "not-applied") {
+        throw new TypeError("cron replay attempt is closed; reviewed retry required");
+      }
+      if (replay.state === "accepted") {
+        if ("enqueued" in replay.result) {
+          throw new TypeError("cron replay result is not an add");
+        }
+        return replay.result;
+      }
+    }
     warnIfDisabled(state, "add");
     if (input.payload.kind === "heartbeat" && opts?.systemOwned !== true) {
       throw new Error("system-owned payloads cannot be created by cron clients");
@@ -162,6 +183,7 @@ export async function add(
       );
     if (existing && plan.updated) {
       const committedJob = await persistUpdatedJob({
+        replay: opts?.replay,
         state,
         source,
         previousJob: existing,
@@ -172,9 +194,17 @@ export async function add(
         jobMutation: mutation,
         jobMutationSnapshot: mutationSnapshot,
       });
+      if (opts?.replay) {
+        const replay = await inspectCronReplay(state, opts.replay, opts.commitGuard);
+        if (replay.state !== "accepted" || "enqueued" in replay.result) {
+          throw new Error("cron replay add outcome missing");
+        }
+        return replay.result;
+      }
       return { ...committedJob, created: false, updated: true, job: committedJob };
     }
-    await persistCronJobMutation({
+    const replayOutcome = await persistCronJobMutation({
+      replay: opts?.replay,
       state,
       source,
       method: "cron.add",
@@ -208,6 +238,15 @@ export async function add(
         });
       },
     });
+    if (replayOutcome?.state === "accepted") {
+      if ("enqueued" in replayOutcome.result) {
+        throw new TypeError("cron replay result is not an add");
+      }
+      return replayOutcome.result;
+    }
+    if (opts?.replay) {
+      throw new TypeError("cron replay add was not accepted; reconcile the attempt");
+    }
     const committedJob = findJobOrThrow(state, job.id);
     return declarationKey
       ? {

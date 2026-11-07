@@ -25,6 +25,7 @@ export function createCronRunRequests(
     const receiptId = (options.event ? undefined : options.runId) ?? `cron-request.${randomUUID()}`;
     return {
       receiptId,
+      replay: options.replay,
       jobId: job.id,
       configRevision: resolveCronJobConfigRevision(job),
       mode: options.onExit

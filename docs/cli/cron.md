@@ -28,6 +28,63 @@ authentication, calls to the configured local loopback Gateway do not open the
 shared state database for device authentication. Remote and explicit URL targets
 retain their device authentication and pairing requirements.
 
+## Candidate: admitted replay identities
+
+The native replay candidate adds optional `--operation-id`, `--effect-id`, and
+`--attempt` flags to `add` and `run`. Supply both IDs; attempt defaults to `1`.
+These IDs must already be admitted by a trusted operator. Changing an effect's
+intent or authority conflicts; inventing another ID does not grant execution.
+The automations tool carries the equivalent `replay` object. In this candidate,
+agent-runtime `add` and `run` calls require that object. Host admission must be
+integrated before enabling this candidate for ordinary agent workflows.
+
+An operator can admit one manual run through the Gateway:
+
+```bash
+openclaw gateway call cron.replay.admit --params '{"operationId":"reviewed-operation","effectId":"run-report","authorityId":"operator","intent":{"action":"run","jobId":"report-job","mode":"force"},"maxAttempts":2,"evidence":"reviewed report request"}'
+openclaw automations run report-job --operation-id reviewed-operation --effect-id run-report
+```
+
+Repeating the admitted request returns its original enqueue receipt, including
+after the job finishes or ordinary run-history receipts are pruned. Accepted
+means enqueued, not that the job or its external effects completed successfully.
+The run intent means "run the current definition of this job"; it does not pin
+the job's configuration revision at admission time. Normal caller authority,
+job ownership, availability, and dispatch-time revision checks still apply.
+
+For creation, call `cron.replay.prepareAdd` with the same job parameters and
+caller identity that will perform `cron.add`. This read-only preparation returns
+the normalized input, authority ID, and `{action:"add",intentHash}`. Review those
+values, then pass the returned intent and authority ID to `cron.replay.admit`.
+Preparation grants no admission and does not validate eventual execution
+eligibility. Send the original job parameters with the admitted `replay` object
+to `cron.add`. The stored result covers declaration convergence as well as new
+creation; retrying cannot overwrite later edits or recreate a removed job.
+
+Trusted operator controls use `cron.replay.inspect`, `cron.replay.close`, and
+`cron.replay.retry`. They take the same `operationId`, `effectId`, `authorityId`,
+and `intent`, plus `attempt`. Retry also requires `evidence`; its attempt is the
+next attempt being authorized. Inspect returns the durable state without
+changing it. Close either returns the accepted receipt or permanently closes
+that attempt as `not-applied`, in the same transaction boundary used by dispatch.
+Only closed, non-applied attempts permit a bounded reviewed retry. A timeout or
+an empty history search is not evidence of non-execution.
+
+Control mutations require an authenticated `operator.admin` caller. Agent
+runtime callers cannot use them, including with automation-management grants.
+Agent authority IDs have the form `agent:<agentId>:<sessionKey>`; operator calls
+share the existing administrative trust domain `operator`. IDs are not secrets
+or capabilities. Existing operator mutations without replay IDs remain available;
+access to raw operator credentials still bypasses agent replay enforcement.
+This candidate does not isolate same-account shell commands or protect job
+updates, removal, wake, arbitrary scripts, or downstream job effects.
+
+Replay admissions and outcomes are retained in the shared state database,
+independently of job and run-history deletion. They have no automatic expiry in
+this candidate. Treat their storage and restore policy as part of the native
+release review; do not register simulator or source-test results as production
+upgrade qualification.
+
 ## Create jobs quickly
 
 `openclaw automations create` is an alias for `openclaw automations add`. For new jobs, put the schedule first and the prompt second:

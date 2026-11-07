@@ -192,11 +192,12 @@ export async function commitCronRunRequests(
       }),
     {
       assertCurrent: assertRequestCurrent,
-      createAdmission: options.event
-        ? createSqliteWorkerWriteAdmission(assertRequestCurrent, [
-            source.context.admission.databasePath,
-          ])
-        : undefined,
+      createAdmission:
+        options.event || options.replay
+          ? createSqliteWorkerWriteAdmission(assertRequestCurrent, [
+              source.context.admission.databasePath,
+            ])
+          : undefined,
     },
   );
   if (result.rejected.some(({ reason }) => reason === "event-invalidated")) {

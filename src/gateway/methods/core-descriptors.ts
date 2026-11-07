@@ -340,6 +340,11 @@ export const CORE_GATEWAY_METHOD_SPECS = [
   ["cron.update", "cron", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
   ["cron.remove", "cron", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
   ["cron.run", "cron", "operator.admin", "<=2026.7", CONTROL_PLANE_WRITE],
+  ["cron.replay.prepareAdd", "cron", "operator.admin", "2026.11"],
+  ["cron.replay.admit", "cron", "operator.admin", "2026.11", CONTROL_PLANE_WRITE],
+  ["cron.replay.inspect", "cron", "operator.admin", "2026.11"],
+  ["cron.replay.close", "cron", "operator.admin", "2026.11", CONTROL_PLANE_WRITE],
+  ["cron.replay.retry", "cron", "operator.admin", "2026.11", CONTROL_PLANE_WRITE],
   ["cron.runs", "cron", "operator.read", "<=2026.7"],
   ["gateway.identity.get", "system", "operator.read", "<=2026.7"],
   // Deprecated read-only compatibility preview; new restart flows request the
