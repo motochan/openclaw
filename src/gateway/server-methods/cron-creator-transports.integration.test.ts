@@ -34,6 +34,7 @@ import {
 import { createPluginRecord } from "../../plugins/status.test-helpers.js";
 import { setUserProfileRole } from "../../state/user-profile-writes.worker.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
+import { isRecord } from "../../utils.js";
 import {
   captureGatewayDeviceRevocation,
   invalidateGatewayDeviceRevocation,
@@ -50,6 +51,7 @@ import {
   resolveGatewayChatCronCreatorAuthorityAdmission,
   resolveGatewayCronCreatorAuthorityAdmission,
 } from "./cron-creator-authority-admission.js";
+import { cronHandlers } from "./cron.js";
 import { deviceHandlers } from "./devices.js";
 import {
   SESSION,
@@ -88,6 +90,64 @@ beforeEach(async () => {
     ],
   });
 });
+
+// This host review is explicit in each positive creation test; tool transport
+// helpers do not grant replay admission on behalf of the modeled caller.
+async function invokeHostAdmittedAdd(params: {
+  tools: CreatorTransportTools;
+  context: ReturnType<typeof createCronFixture>["context"];
+  operationId: string;
+  effectId: string;
+  job: Record<string, unknown>;
+}) {
+  const result = await params.tools.invoke(AUTOMATIONS_TOOL_NAME, {
+    action: "prepare_add",
+    job: params.job,
+  });
+  let prepared: Record<string, unknown> | undefined;
+  if (isRecord(result) && isRecord(result.details)) {
+    prepared = result.details;
+  } else if (isRecord(result) && Array.isArray(result.content)) {
+    const content = result.content.find((item) => isRecord(item) && item.type === "text");
+    if (isRecord(content) && typeof content.text === "string") {
+      const value: unknown = JSON.parse(content.text);
+      if (isRecord(value)) {
+        prepared = value;
+      }
+    }
+  }
+  const proposal = expectDefined(prepared, "native or MCP prepared add");
+  expect(proposal.authorityId).toBe(`agent:main:${SESSION}`);
+  expect(isRecord(proposal.executionParams)).toBe(true);
+  const replay = { operationId: params.operationId, effectId: params.effectId, attempt: 1 };
+  const replayAdmission = {
+    operationId: replay.operationId,
+    effectId: replay.effectId,
+    authorityId: proposal.authorityId,
+    intent: proposal.intent,
+    evidence: "host-reviewed creator transport fixture",
+    maxAttempts: 1,
+  };
+  const respond = vi.fn();
+  await expectDefined(
+    cronHandlers["cron.replay.admit"],
+    "host replay admission",
+  )({
+    req: { type: "req", id: "host-admit", method: "cron.replay.admit", params: replayAdmission },
+    params: replayAdmission,
+    respond,
+    context: params.context,
+    client: createSyntheticPluginRuntimeClient({ scopes: ["operator.admin"] }),
+    isWebchatConnect: () => false,
+    hasCurrentClientAuthority: () => true,
+  });
+  expect(respond).toHaveBeenCalledWith(true, { state: "prepared" }, undefined);
+  return params.tools.invoke(AUTOMATIONS_TOOL_NAME, {
+    action: "add",
+    job: proposal.executionParams,
+    replay,
+  });
+}
 
 describe("original caller through Cron creator transports", () => {
   it.for([
@@ -204,17 +264,24 @@ describe("original caller through Cron creator transports", () => {
                     admitted,
                     senderIsOwner: true,
                   });
-                  const created = tools.invoke(AUTOMATIONS_TOOL_NAME, {
-                    action: "add",
-                    job: {
-                      name: "Recovered caller job",
-                      enabled: false,
-                      schedule: { kind: "every", everyMs: 60_000 },
-                      sessionTarget: "current",
-                      payload: { kind: "agentTurn", message: "Check status" },
-                      delivery: { mode: "none" },
-                    },
-                  });
+                  const job = {
+                    name: "Recovered caller job",
+                    enabled: false,
+                    schedule: { kind: "every", everyMs: 60_000 },
+                    sessionTarget: "current",
+                    payload: { kind: "agentTurn", message: "Check status" },
+                    delivery: { mode: "none" },
+                  };
+                  const created =
+                    source === "legacy System"
+                      ? tools.invoke(AUTOMATIONS_TOOL_NAME, { action: "add", job })
+                      : invokeHostAdmittedAdd({
+                          tools,
+                          context: fixture.context,
+                          operationId: runId,
+                          effectId: "recovered-live",
+                          job,
+                        });
                   if (source === "legacy System") {
                     await expect(created).rejects.toThrow("missing scope: operator.admin");
                     expect(await fixture.read()).toEqual([]);
@@ -226,8 +293,11 @@ describe("original caller through Cron creator transports", () => {
                     ]);
                     if (revocation !== "none") {
                       hold = true;
-                      const pending = tools.invoke(AUTOMATIONS_TOOL_NAME, {
-                        action: "add",
+                      const pending = invokeHostAdmittedAdd({
+                        tools,
+                        context: fixture.context,
+                        operationId: runId,
+                        effectId: "recovered-revoked",
                         job: {
                           name: "Revoked recovered caller job",
                           enabled: false,
@@ -319,8 +389,11 @@ describe("original caller through Cron creator transports", () => {
           // Tool access does not grant Gateway-wide management admission.
           senderIsOwner: true,
         });
-        await tools.invoke(AUTOMATIONS_TOOL_NAME, {
-          action: "add",
+        await invokeHostAdmittedAdd({
+          tools,
+          context: fixture.context,
+          operationId: "restricted-creator",
+          effectId: "restricted-add",
           job: {
             name: "Restricted caller job",
             schedule: { kind: "every", everyMs: 60_000 },
@@ -442,8 +515,11 @@ describe("original caller through Cron creator transports", () => {
           });
           transportTools = tools;
           const invoke = (name: string) =>
-            tools.invoke(AUTOMATIONS_TOOL_NAME, {
-              action: "add",
+            invokeHostAdmittedAdd({
+              tools,
+              context: fixture.context,
+              operationId: runId,
+              effectId: name,
               job: {
                 name,
                 schedule: { kind: "every", everyMs: 60_000 },

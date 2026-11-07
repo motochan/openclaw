@@ -255,6 +255,12 @@ const AGENT_RUNTIME_IDENTITY_METHODS = new Set<string>([
   "cron.remove",
   "cron.run",
   "cron.runs",
+  "cron.replay.capabilities",
+  "cron.replay.prepareAdd",
+  "cron.replay.admit",
+  "cron.replay.inspect",
+  "cron.replay.close",
+  "cron.replay.retry",
   "secrets.store.delete",
 ]);
 
