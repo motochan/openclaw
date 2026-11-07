@@ -1,4 +1,5 @@
 import {
+  validateCronStatusParams,
   validateCronAddParams,
   validateCronRunParams,
   validateCronReplayAdmitParams,
@@ -17,6 +18,11 @@ import type { CronReplayControl } from "../../cron/service/replay.js";
 import type { CronJobCreate } from "../../cron/types.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { isRecord } from "../../utils.js";
+import {
+  VERSION,
+  resolveRuntimeServiceBuildId,
+  resolveRuntimeServiceCommit,
+} from "../../version.js";
 import { getCronManagementAuthority } from "../cron-creator-authority-grant.js";
 import { getGatewayProcessInstanceId } from "../process-instance.js";
 import {
@@ -180,6 +186,30 @@ async function control(args: GatewayRequestHandlerOptions, command: CronReplayCo
 }
 
 export const cronReplayHandlers: GatewayRequestHandlers = {
+  "cron.replay.capabilities": async (args) => {
+    if (
+      !assertValidParams(
+        args.params,
+        validateCronStatusParams,
+        "cron.replay.capabilities",
+        args.respond,
+      )
+    ) {
+      return;
+    }
+    assertCronReadCurrent(args);
+    args.respond(
+      true,
+      {
+        contract: "cron-replay/v1",
+        version: VERSION,
+        buildId: resolveRuntimeServiceBuildId(),
+        commit: resolveRuntimeServiceCommit(),
+        processInstanceId: getGatewayProcessInstanceId(),
+      },
+      undefined,
+    );
+  },
   "cron.replay.prepareAdd": async (args) => {
     try {
       const { candidate, enabledExplicit } = normalizeCronAddRequest(args.params);

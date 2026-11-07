@@ -191,6 +191,7 @@ describe("cron tool", () => {
   it.each([
     { action: "remove", jobId: "job-other" },
     { action: "add", job: buildReminderAgentTurnJob() },
+    { action: "prepare_add", job: buildReminderAgentTurnJob() },
   ])("denies scoped isolated cron runs from using $action outside their job", async (args) => {
     await expect(
       executeCron(args, {
@@ -543,6 +544,78 @@ describe("cron tool", () => {
     });
   });
 
+  it("prepares final defaulted add parameters without creating or admitting a job", async () => {
+    const finalJob = {
+      name: "prepared reminder",
+      enabled: true,
+      deleteAfterRun: true,
+      schedule: { kind: "at", at: new Date(123).toISOString() },
+      sessionTarget: "main",
+      wakeMode: "now",
+      payload: { kind: "systemEvent", text: "hello" },
+    };
+    const nativePreparation = {
+      authorityId: "operator",
+      intent: { action: "add", intentHash: "a".repeat(64) },
+      input: finalJob,
+      enabledExplicit: true,
+    };
+    callGatewayMock.mockResolvedValue(nativePreparation);
+    const result = await executeCron({
+      action: "prepare_add",
+      job: {
+        name: "prepared reminder",
+        schedule: { atMs: 123 },
+        payload: { kind: "systemEvent", text: "hello" },
+      },
+    });
+
+    expect(expectSingleGatewayCallMethod("cron.replay.prepareAdd")).toEqual(finalJob);
+    expect(result.details).toEqual({
+      authorityId: nativePreparation.authorityId,
+      intent: nativePreparation.intent,
+      executionParams: finalJob,
+    });
+  });
+
+  it("prepares under current creator caps and revalidates them on add", async () => {
+    callGatewayMock.mockResolvedValue({
+      authorityId: "agent:main:agent:main:main",
+      intent: { action: "add", intentHash: "b".repeat(64) },
+      input: {},
+      enabledExplicit: true,
+    });
+    const creatorToolAllowlist = ["read", "cron"];
+    const tool = createTestCronTool({
+      agentSessionKey: "agent:main:main",
+      creatorToolAllowlist,
+    });
+    const prepared = await tool.execute("prepare-capped-job", {
+      action: "prepare_add",
+      job: {
+        name: "capped reminder",
+        schedule: { kind: "every", everyMs: 60_000 },
+        sessionTarget: "isolated",
+        payload: { kind: "agentTurn", message: "fixture", toolsAllow: ["read", "exec"] },
+        delivery: { mode: "none" },
+      },
+    });
+    expect(expectSingleGatewayCallMethod("cron.replay.prepareAdd")).toMatchObject({
+      payload: { toolsAllow: ["read"] },
+    });
+    const details = prepared.details as { executionParams: Record<string, unknown> };
+    creatorToolAllowlist.splice(0, 1);
+    await tool.execute("add-capped-job", {
+      action: "add",
+      job: details.executionParams,
+      replay: { operationId: "reviewed", effectId: "add", attempt: 1 },
+    });
+    expect(readGatewayCall(1)).toMatchObject({
+      method: "cron.add",
+      params: { payload: { toolsAllow: [] } },
+    });
+  });
+
   it("preserves omitted declaration enablement and forwards explicit enablement", async () => {
     const tool = createTestCronTool();
     const baseJob = {
@@ -658,46 +731,49 @@ describe("cron tool", () => {
     expect(callGatewayMock).not.toHaveBeenCalled();
   });
 
-  it("does not write when the admitted run aborts while lazy authority resolves", async () => {
-    let finishResolution!: () => void;
-    const resolution = new Promise<void>((resolve) => {
-      finishResolution = resolve;
-    });
-    const abortController = new AbortController();
-    const run = runWithTestCronCreatorAuthority(
-      "run-timeout",
-      () => {
-        const resolveCreatorToolAuthority = runWithCronCreatorAuthorityResolver({
-          runId: "run-timeout",
-          resolve: async () => {
-            await resolution;
-            return {
-              tools: ["read", "configured__lookup"],
-              provenance: { version: 1, source: "final-executable-surface" },
-            };
-          },
-          run: () => bindActiveCronCreatorAuthorityResolver("run-timeout"),
-        });
+  it.each(["add", "prepare_add"])(
+    "does not dispatch %s when the run aborts while authority resolves",
+    async (action) => {
+      let finishResolution!: () => void;
+      const resolution = new Promise<void>((resolve) => {
+        finishResolution = resolve;
+      });
+      const abortController = new AbortController();
+      const run = runWithTestCronCreatorAuthority(
+        "run-timeout",
+        () => {
+          const resolveCreatorToolAuthority = runWithCronCreatorAuthorityResolver({
+            runId: "run-timeout",
+            resolve: async () => {
+              await resolution;
+              return {
+                tools: ["read", "configured__lookup"],
+                provenance: { version: 1, source: "final-executable-surface" },
+              };
+            },
+            run: () => bindActiveCronCreatorAuthorityResolver("run-timeout"),
+          });
 
-        return executeCron(
-          {
-            action: "add",
-            job: buildReminderAgentTurnJob(),
-          },
-          {
-            agentSessionKey: "agent:main:main",
-            resolveCreatorToolAuthority,
-          },
-        );
-      },
-      abortController.signal,
-    );
+          return executeCron(
+            {
+              action,
+              job: buildReminderAgentTurnJob(),
+            },
+            {
+              agentSessionKey: "agent:main:main",
+              resolveCreatorToolAuthority,
+            },
+          );
+        },
+        abortController.signal,
+      );
 
-    abortController.abort(new Error("run timed out"));
-    finishResolution();
-    await expect(run).rejects.toThrow();
-    expect(callGatewayMock).not.toHaveBeenCalled();
-  });
+      abortController.abort(new Error("run timed out"));
+      finishResolution();
+      await expect(run).rejects.toThrow();
+      expect(callGatewayMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("lets a later cron operation rematerialize after an earlier operation abort", async () => {
     let finishFirstResolution!: () => void;

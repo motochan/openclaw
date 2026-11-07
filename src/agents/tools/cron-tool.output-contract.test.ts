@@ -210,6 +210,12 @@ describe("automations output contract", () => {
       "cron.status": { enabled: true, jobs: 1 },
       "cron.get": job,
       "cron.runs": history,
+      "cron.replay.prepareAdd": {
+        authorityId: "operator",
+        intent: { action: "add", intentHash: "a".repeat(64) },
+        input: { ...createJob, enabled: true },
+        enabledExplicit: true,
+      },
     };
     const gatewayCall = vi.fn().mockImplementation(async (method: string) => {
       if (!(method in replies)) {
@@ -239,7 +245,9 @@ async function consume() {
   const scheduleErrorCount = details.state.scheduleErrorCount;
   const runs = await automations({ action: "runs", jobId: details.id });
   const summaries = runs.entries.map(entry => entry.summary);
-  return { names, next, enabled, jobCount, name, scheduleErrorCount, summaries };
+  const prepared = await automations({ action: "prepare_add", job: ${JSON.stringify(createJob)} });
+  const preparedName = prepared.executionParams.name;
+  return { names, next, enabled, jobCount, name, scheduleErrorCount, summaries, preparedName };
 }
 `;
     const fileName = "/automations-consumer.ts";
@@ -256,6 +264,12 @@ async function checkContracts(action: "list" | "runs", input: Parameters<typeof 
     const cancellation: true | undefined = removed.activeRunCancellationRequested;
     const cleanup: "pending" | undefined = removed.sessionCleanup;
   }
+  const prepared = await automations({ action: "prepare_add", job: ${JSON.stringify(createJob)} });
+  const authority: string = prepared.authorityId;
+  const intentHash: string = prepared.intent.intentHash;
+  const finalName: string = prepared.executionParams.name;
+  // @ts-expect-error Preparation does not return a creator authority grant.
+  prepared.cronCreatorAuthorityGrant;
   const added = await automations({ action: "add", job: ${JSON.stringify(createJob)} });
   // @ts-expect-error Add can return a direct job or a convergence envelope.
   added.id;
@@ -297,8 +311,9 @@ async function checkContracts(action: "list" | "runs", input: Parameters<typeof 
         name: job.name,
         scheduleErrorCount: 3,
         summaries: ["Three unpaid invoices"],
+        preparedName: job.name,
       },
     });
-    expect(gatewayCall).toHaveBeenCalledTimes(4);
+    expect(gatewayCall).toHaveBeenCalledTimes(5);
   });
 });

@@ -12,6 +12,7 @@ const AUTHORITY_GUARDED_READS = new Set([
   "cron.runs",
   "cron.history",
   "cron.replay.prepareAdd",
+  "cron.replay.capabilities",
 ]);
 
 // The existing one-use grant is request-scoped; the original runtime identity

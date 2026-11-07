@@ -61,6 +61,19 @@ eligibility. Send the original job parameters with the admitted `replay` object
 to `cron.add`. The stored result covers declaration convergence as well as new
 creation; retrying cannot overwrite later edits or recreate a removed job.
 
+For tool-origin adds, use the automations tool's read-only `prepare_add` action
+first. It applies the same defaults, tool caps, session routing, delivery and
+reminder context as `add`, then returns native preparation plus `executionParams`.
+The host reviews and admits those final parameters. Submit `executionParams` as
+the add's `job` with its admitted reference. Execution still revalidates current
+authority and restrictions; a context change that changes the final intent is a
+conflict, not permission to mint another effect or bypass a held attempt.
+
+`cron.replay.capabilities` reports the replay contract and immutable running
+build/process identity. A guard cutover must match its reviewed build ID and
+contract; the release version alone is insufficient. Missing build provenance
+cannot qualify a cutover. This endpoint grants no admission or execution rights.
+
 Trusted operator controls use `cron.replay.inspect`, `cron.replay.close`, and
 `cron.replay.retry`. They take the same `operationId`, `effectId`, `authorityId`,
 and `intent`, plus `attempt`. Retry also requires `evidence`; its attempt is the

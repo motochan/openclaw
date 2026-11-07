@@ -1,6 +1,7 @@
 // Local cross-repository qualification: requires JAMIE_HARNESS_ROOT explicitly.
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { expect, it } from "vitest";
 import { runManagedCommand } from "../scripts/lib/managed-child-process.mts";
 import { createCronTool } from "../src/agents/tools/cron-tool.js";
@@ -185,7 +186,7 @@ print(json.dumps(receipt))
       // Explicitly demonstrate the unresolved raw-add/tool normalization gap.
       const rawAdd = {
         name: "raw-tool-add-mismatch",
-        schedule: { kind: "at", at: "2099-01-01T00:00:00.000Z" },
+        schedule: { kind: "at", at: new Date(Date.now() + 86_400_000).toISOString() },
         sessionTarget: "main",
         wakeMode: "now",
         payload: { kind: "systemEvent", text: "fixture" },
@@ -206,6 +207,133 @@ print(json.dumps(receipt))
       await expect(
         tool.execute("raw-add", { action: "add", job: rawAdd, replay: addReplay }),
       ).rejects.toThrow(/conflict/);
+      // Preparation uses the actual tool; the host reviews its final RPC payload.
+      const finalPrepared = await tool.execute("prepare-final-add", {
+        action: "prepare_add",
+        job: rawAdd,
+      });
+      const preparedPath = path.join(instance.homeDir, "prepared-tool-add.json");
+      await fs.writeFile(
+        preparedPath,
+        JSON.stringify({
+          request: { action: "prepare_add", job: rawAdd, contextMessages: 0 },
+          response: finalPrepared.details,
+        }),
+        { mode: 0o600 },
+      );
+      let toolRequestJson = "";
+      const addCode = `
+import json, sys
+from harness.scheduler_admission import GatewayCLI, HostAdmission
+journal, launcher, target, prepared_path = sys.argv[1:]
+rpc = GatewayCLI(launcher, target)
+handoff = json.load(open(prepared_path))
+def prepared_call(params):
+    assert params == handoff["request"]
+    return handoff["response"]
+host = HostAdmission(journal, target=target, authority="operator", control_rpc=rpc, execution_rpc=rpc,
+    tool_call=prepared_call)
+proposal = host.plan_tool_add("a" * 64, "prepared-add", handoff["request"]["job"])
+host.admit(proposal, review_digest=proposal["reviewDigest"], evidence="qualification/final-tool-parameters")
+print(json.dumps(host.tool_request("a" * 64, "prepared-add")))
+`;
+      const addStatus = await runManagedCommand({
+        bin: "python3",
+        args: ["-c", addCode, journal, launcher, instance.url, preparedPath],
+        cwd: harnessRoot,
+        env: { ...instance.env, PYTHONPATH: harnessRoot },
+        timeoutMs: 60_000,
+        stdio: ["ignore", "pipe", "pipe"],
+        onReady: (child) => {
+          child.stdout?.on("data", (chunk) => {
+            toolRequestJson += String(chunk);
+          });
+          child.stderr?.on("data", (chunk) => {
+            stderr += String(chunk);
+          });
+        },
+      });
+      expect(addStatus, stderr).toBe(0);
+      const finalToolRequest = JSON.parse(toolRequestJson) as Record<string, unknown>;
+      const added = await tool.execute("prepared-add-first", finalToolRequest);
+      expect((await tool.execute("prepared-add-retry", finalToolRequest)).details).toEqual(
+        added.details,
+      );
+      const jobs = await client.request<{ jobs: Array<{ name: string }> }>("cron.list", {
+        includeDisabled: true,
+      });
+      expect(jobs.jobs.filter((job) => job.name === rawAdd.name)).toHaveLength(1);
+
+      // Real plugin guard + native capability endpoint, with synthetic hook identity.
+      const { createReplayGuard } = await import(
+        pathToFileURL(path.join(harnessRoot, "plugins/relay-format/lib/replay-guard.js")).href
+      );
+      const { createNativeSchedulerReplayGate } = await import(
+        pathToFileURL(path.join(harnessRoot, "plugins/relay-format/lib/native-scheduler-replay.js"))
+          .href
+      );
+      const capabilities = await client.request<{ buildId: string }>(
+        "cron.replay.capabilities",
+        {},
+      );
+      expect(capabilities.buildId).toEqual(expect.any(String));
+      const guardedOperation = "a".repeat(64);
+      const guard = createReplayGuard({
+        root: path.join(instance.homeDir, "guard"),
+        operations: { resolve: () => guardedOperation },
+        nativeSchedulerGate: createNativeSchedulerReplayGate({
+          config: { buildId: capabilities.buildId },
+          request: (method: string, params: Record<string, unknown>) =>
+            activeClient.request(method, params),
+        }),
+      });
+      const event = {
+        toolName: "automations",
+        params: {
+          action: "run",
+          jobId,
+          runMode: "force",
+          replay: { operationId: guardedOperation, effectId: "guard-run", attempt: 1 },
+        },
+      };
+      const context = {
+        sessionKey: "agent:main:qualification",
+        sessionId: "fixture-session",
+        runId: "fixture-run",
+        toolCallId: "fixture-call",
+      };
+      const guardedAdd = { toolName: "automations", params: finalToolRequest };
+      expect(await guard.before(guardedAdd, context)).toBeUndefined();
+      expect((await tool.execute("guarded-prepared-add-retry", finalToolRequest)).details).toEqual(
+        added.details,
+      );
+      await client.request("cron.replay.admit", {
+        operationId: guardedOperation,
+        effectId: "guard-run",
+        authorityId: "operator",
+        intent: { action: "run", jobId, mode: "due" },
+        evidence: "fixture/guard",
+        maxAttempts: 1,
+      });
+      // An allowed hook is not admission: the Gateway still rejects changed intent.
+      expect(await guard.before(event, context)).toBeUndefined();
+      await expect(tool.execute("guard-native-conflict", event.params)).rejects.toThrow(/conflict/);
+      expect(await guard.before(event, context)).toBeUndefined();
+      const oldGuard = createReplayGuard({
+        root: path.join(instance.homeDir, "old-guard"),
+        operations: { resolve: () => guardedOperation },
+      });
+      expect(oldGuard.before(event, context)).toBeUndefined();
+      const heldGuard = createReplayGuard({
+        root: path.join(instance.homeDir, "old-guard"),
+        operations: { resolve: () => guardedOperation },
+        nativeSchedulerGate: createNativeSchedulerReplayGate({
+          config: { buildId: capabilities.buildId },
+          request: (method: string, params: Record<string, unknown>) =>
+            activeClient.request(method, params),
+        }),
+      });
+      expect(await heldGuard.before(event, context)).toMatchObject({ block: true });
       await disconnectGatewayClient(client);
       client = undefined;
       await instance.stopGateway();

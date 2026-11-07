@@ -1,6 +1,8 @@
 import { Type, type TProperties } from "typebox";
 import {
   CronAddJobResultSchema,
+  CronAddParamsSchema,
+  CronReplayAdmitParamsSchema,
   CronAddResultSchema,
   CronDeliveryPreviewSchema,
   CronJobSchema,
@@ -151,6 +153,14 @@ export const CronToolOutputSchema = defineToolOutputSchema({
     status: CronStatusOutputSchema,
     list: CronListOutputSchema,
     get: CronJobSchema,
+    prepare_add: closedObject({
+      authorityId: CronReplayAdmitParamsSchema.properties.authorityId,
+      intent: closedObject({
+        action: Type.Literal("add"),
+        intentHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+      }),
+      executionParams: CronAddParamsSchema,
+    }),
     // Add can return a direct job or the declarative convergence envelope.
     add: CronAddResultSchema,
     update: CronAddJobResultSchema,

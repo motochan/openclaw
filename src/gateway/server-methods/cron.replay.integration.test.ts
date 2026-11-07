@@ -178,3 +178,24 @@ it("prepares the normalized add intent before admission and reuses its native jo
     ),
   ).toHaveLength(1);
 });
+
+it("reports immutable runtime replay capabilities without granting an effect", async () => {
+  const { invoke, admission, runner } = await setup("gateway-replay-capabilities");
+  const capabilities = await invoke("cron.replay.capabilities", {});
+  expect(capabilities?.[0]).toBe(true);
+  expect(capabilities?.[1]).toMatchObject({
+    contract: "cron-replay/v1",
+    processInstanceId: expect.any(String),
+    version: expect.any(String),
+  });
+  const absent = await invoke("cron.replay.inspect", {
+    operationId: admission.operationId,
+    effectId: admission.effectId,
+    authorityId: admission.authorityId,
+    intent: admission.intent,
+    attempt: 1,
+  });
+  expect(absent?.[0]).toBe(false);
+  expect(absent?.[2]?.message).toContain("admission missing");
+  expect(runner).not.toHaveBeenCalled();
+});

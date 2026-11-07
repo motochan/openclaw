@@ -4,6 +4,58 @@ import { typeCheckSources } from "../../test/helpers/typescript.js";
 import { createCodeModeToolApiFile } from "./code-mode-tool-api.js";
 import { defineToolOutputSchema } from "./schema/tool-output-schema.js";
 
+it("reuses exact nested record fields without inheriting optional indexed access", async () => {
+  const payload = Type.Object(
+    Object.fromEntries(
+      Array.from({ length: 120 }, (_, index) => [
+        `field_${index}_${"x".repeat(85)}`,
+        Type.String(),
+      ]),
+    ),
+    { additionalProperties: false },
+  );
+  const file = await createCodeModeToolApiFile("records", {
+    source: "openclaw",
+    parameters: Type.Object({ action: Type.String() }),
+    outputSchema: defineToolOutputSchema({
+      inputProperty: "action",
+      variants: {
+        get: Type.Object(
+          { payload, optional: Type.Optional(Type.String()) },
+          { additionalProperties: false },
+        ),
+        prepare: Type.Object(
+          {
+            input: Type.Object(
+              { payload: structuredClone(payload), optional: Type.String() },
+              { additionalProperties: false },
+            ),
+            executionParams: Type.Object(
+              { payload: structuredClone(payload) },
+              { additionalProperties: false },
+            ),
+          },
+          { additionalProperties: false },
+        ),
+      },
+    }),
+  });
+  expect(
+    typeCheckSources({
+      "/records-consumer.ts": `${file.content}
+async function consume() {
+  const result = await records({ action: "prepare" });
+  const field: string = result.executionParams.payload[${JSON.stringify(`field_0_${"x".repeat(85)}`)}];
+  const required: string = result.input.optional;
+  // @ts-expect-error Exact payload fields remain strings.
+  const numeric: number = result.input.payload[${JSON.stringify(`field_0_${"x".repeat(85)}`)}];
+  // @ts-expect-error The prepared result has no scheduler identity.
+  result.id;
+}`,
+    }),
+  ).toEqual([]);
+});
+
 it("preserves extended action results within the shared declaration allowance", async () => {
   const fields = {
     id: Type.String(),

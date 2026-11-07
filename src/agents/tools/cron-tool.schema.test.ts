@@ -56,7 +56,7 @@ describe("cron model schema regressions", () => {
     for (const field of ["job", "text", "mode", "runMode", "sessionKey", "contextMessages"]) {
       expect(restricted.parameters).not.toHaveProperty(`properties.${field}`);
     }
-    for (const action of ["add", "update", "run", "wake"]) {
+    for (const action of ["prepare_add", "add", "update", "run", "wake"]) {
       expect(Value.Check(restricted.parameters, { action, jobId: "current" })).toBe(false);
     }
     expect(restricted.description).not.toContain("ADD: job");

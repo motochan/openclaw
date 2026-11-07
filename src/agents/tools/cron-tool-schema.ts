@@ -26,6 +26,7 @@ const CRON_ACTIONS = [
   "status",
   "list",
   "get",
+  "prepare_add",
   "add",
   "update",
   "remove",
@@ -417,7 +418,7 @@ function buildCronToolSchema(options?: CronToolSchemaOptions): TSchema {
         additionalProperties: true,
         description: managementOnly
           ? "Partial update: only supplied fields change; null clears."
-          : 'Job fields. action="add": full job. action="update": partial patch — only supplied fields change; null clears.',
+          : 'Job fields. action="prepare_add" or "add": full job. action="update": partial patch — only supplied fields change; null clears.',
       },
     ),
   );

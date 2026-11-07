@@ -64,6 +64,7 @@ export async function createCodeModeToolApiFile(
 }
 
 type ObjectDeclaration = {
+  schema: unknown;
   name: string;
   properties: Record<string, unknown>;
   required: Set<string>;
@@ -89,7 +90,49 @@ function readObjectDeclaration(name: string, schema: unknown): ObjectDeclaration
   if ([...required].some((key) => !Object.hasOwn(properties, key))) {
     return undefined;
   }
-  return { name, properties, required };
+  return { name, properties, required, schema };
+}
+
+// Reuse exact property contracts already emitted for earlier object variants.
+// This also covers nested request objects which repeat fields of returned records.
+function factorObjectProperties(schema: unknown, objects: ObjectDeclaration[], depth = 0): string {
+  const original = toolSchemaDeclaration(schema);
+  if (depth >= 12 || original === "unknown") {
+    return original;
+  }
+  for (const base of objects) {
+    if (isDeepStrictEqual(schema, base.schema) && base.name.length < original.length) {
+      return base.name;
+    }
+  }
+  if (isRecord(schema) && Object.keys(schema).length === 1 && Array.isArray(schema.anyOf)) {
+    const factored = schema.anyOf
+      .map((item) => factorObjectProperties(item, objects, depth + 1))
+      .join(" | ");
+    return factored.length < original.length ? factored : original;
+  }
+  const object =
+    depth < 12 && original !== "unknown" ? readObjectDeclaration("", schema) : undefined;
+  if (!object) {
+    return original;
+  }
+  const fields = Object.entries(object.properties).map(([key, value]) => {
+    let type = factorObjectProperties(value, objects, depth + 1);
+    for (const base of objects) {
+      for (const [baseKey, baseValue] of Object.entries(base.properties)) {
+        // Optional indexed access includes undefined; only required fields are exact aliases.
+        if (base.required.has(baseKey) && isDeepStrictEqual(value, baseValue)) {
+          const reference = `${base.name}[${JSON.stringify(baseKey)}]`;
+          if (reference.length < type.length) {
+            type = reference;
+          }
+        }
+      }
+    }
+    return `${JSON.stringify(key)}${object.required.has(key) ? "" : "?"}: ${type}`;
+  });
+  const factored = fields.length ? `{ ${fields.join("; ")} }` : "Record<string, never>";
+  return factored.length < original.length ? factored : original;
 }
 
 function createVariantDeclarations(params: {
@@ -123,6 +166,17 @@ function createVariantDeclarations(params: {
     // Preserve root shape constraints; unsupported types stay unknown.
     let output = toolSchemaDeclaration({ ...outputSchema, anyOf: [schema] });
     const object = output === "unknown" ? undefined : readObjectDeclaration(name, schema);
+    if (
+      isRecord(outputSchema) &&
+      Object.keys(outputSchema).every(
+        (key) => key === "anyOf" || key === "x-openclaw-input-discriminator",
+      )
+    ) {
+      const factored = factorObjectProperties(schema, objects);
+      if (factored.length < output.length) {
+        output = factored;
+      }
+    }
     if (object) {
       // Extended results share their already-declared fields without widening either contract.
       for (const base of objects) {
