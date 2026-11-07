@@ -5,6 +5,7 @@ import type { ServerResponse } from "node:http";
 import path from "node:path";
 import { expect, it } from "vitest";
 import { runManagedCommand } from "../scripts/lib/managed-child-process.mts";
+import type { OpenClawConfig } from "../src/config/types.openclaw.js";
 import { connectGatewayClient, disconnectGatewayClient } from "../src/gateway/test-helpers.e2e.js";
 import { isRecord } from "../src/utils.js";
 import {
@@ -99,6 +100,10 @@ it.runIf(process.env.OPENCLAW_ISOLATION_IMAGE !== undefined)(
   "isolates host credentials and journal from actual agent shell while retaining admitted automations",
   { timeout: 180_000 },
   async () => {
+    const harnessRoot = process.env.JAMIE_HARNESS_ROOT;
+    if (!harnessRoot || !path.isAbsolute(harnessRoot)) {
+      throw new Error("JAMIE_HARNESS_ROOT must identify the reviewed host adapter checkout");
+    }
     const image = process.env.OPENCLAW_ISOLATION_IMAGE;
     if (!image || !/^sha256:[a-f0-9]{64}$/.test(image)) {
       throw new Error("OPENCLAW_ISOLATION_IMAGE must pin an existing local Docker image ID");
@@ -118,7 +123,9 @@ it.runIf(process.env.OPENCLAW_ISOLATION_IMAGE !== undefined)(
     let probe = "";
     let marker = "";
     let secretPath = "";
-    let preparedJob: unknown;
+    let preparedJob: Record<string, unknown>;
+    let preparedIntent: unknown;
+    let firstJob: unknown;
     const replay = { operationId: "sandbox-admitted-op", effectId: "add", attempt: 1 };
     const job = {
       name: "Sandbox admitted automation",
@@ -200,21 +207,57 @@ it.runIf(process.env.OPENCLAW_ISOLATION_IMAGE !== undefined)(
               if (!isRecord(prepared)) {
                 throw new Error("invalid prepared job");
               }
+              if (!isRecord(prepared.executionParams)) {
+                throw new Error("missing final job");
+              }
               preparedJob = prepared.executionParams;
-              reviewed.resolve(prepared);
-              await admitted.promise;
+              preparedIntent = prepared.intent;
               tool(response, 9, "automations", { action: "add", job: preparedJob, replay });
               break;
             }
             case 10:
-              expect(JSON.parse(output(body, 9))).toMatchObject({
+              expect(output(body, 9)).toContain("host review required");
+              reviewed.resolve({});
+              await admitted.promise;
+              tool(response, 10, "automations", { action: "add", job: preparedJob, replay });
+              break;
+            case 11:
+              firstJob = JSON.parse(output(body, 10));
+              expect(firstJob).toMatchObject({
                 name: job.name,
                 owner: { agentId: "main", sessionKey: SESSION },
               });
+              tool(response, 11, "automations", { action: "add", job: preparedJob, replay });
+              break;
+            case 12:
+              expect(JSON.parse(output(body, 11))).toEqual(firstJob);
+              tool(response, 12, "automations", {
+                action: "add",
+                job: { ...preparedJob, name: "Unreviewed changed job" },
+                replay,
+              });
+              break;
+            case 13:
+              expect(output(body, 12)).toContain("conflict");
+              tool(response, 13, "exec", { command: probe, yieldMs: 10000 });
+              break;
+            case 14:
+              expect(output(body, 13)).toContain("ISOLATION_PROBE_PASSED");
               writeOpenAiResponsesText(response, {
                 text: COMPLETE,
                 messageId: "msg_isolation",
                 responseId: "resp_isolation_done",
+              });
+              break;
+            case 15:
+              tool(response, 15, "automations", { action: "add", job: preparedJob, replay });
+              break;
+            case 16:
+              expect(JSON.parse(output(body, 15))).toEqual(firstJob);
+              writeOpenAiResponsesText(response, {
+                text: COMPLETE,
+                messageId: "msg_isolation_restart",
+                responseId: "resp_isolation_restart_done",
               });
               break;
             default:
@@ -283,13 +326,42 @@ it.runIf(process.env.OPENCLAW_ISOLATION_IMAGE !== undefined)(
       secretPath = instance.configPath;
       marker = path.join(instance.homeDir, "escaped-marker");
       const journal = path.join(instance.homeDir, "host-admission.sqlite");
+      const launcher = path.join(instance.homeDir, "candidate-cli");
+      await fs.writeFile(
+        launcher,
+        `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(path.resolve("dist/index.js"))} "$@"\n`,
+        { mode: 0o700 },
+      );
+      const effectiveConfig = JSON.parse(
+        await fs.readFile(instance.configPath, "utf8"),
+      ) as OpenClawConfig;
+      effectiveConfig.plugins = {
+        ...effectiveConfig.plugins,
+        enabled: true,
+        allow: ["scheduler-admission", "openai"],
+        load: { paths: [path.join(harnessRoot, "plugins/scheduler-admission")] },
+        entries: {
+          "scheduler-admission": {
+            enabled: true,
+            hooks: { allowConversationAccess: true },
+            config: {
+              repoDir: harnessRoot,
+              database: journal,
+              target: instance.url,
+              executable: launcher,
+            },
+          },
+        },
+      };
+      await fs.writeFile(instance.configPath, JSON.stringify(effectiveConfig));
       await command("python3", [
         "-c",
-        "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('CREATE TABLE grants (evidence TEXT)'); c.execute('INSERT INTO grants VALUES (?)',('host-reviewed',)); c.commit(); c.close()",
+        "import sys; sys.path.insert(0,sys.argv[1]); from harness.scheduler_admission import HostAdmission; HostAdmission(sys.argv[2],target=sys.argv[3],authority=sys.argv[4],control_rpc=None,execution_rpc=None)",
+        harnessRoot,
         journal,
+        instance.url,
+        `agent:main:${SESSION}`,
       ]);
-      await fs.chmod(journal, 0o600);
-      const journalBefore = await fs.readFile(journal);
       const configBefore = await fs.readFile(secretPath);
       const paths = [
         secretPath,
@@ -309,7 +381,7 @@ try:
 except (FileNotFoundError,PermissionError): pass
 else: raise AssertionError('journal writable')
 try:
- c=sqlite3.connect('file:'+sys.argv[2]+'?mode=rw',uri=True); c.execute("INSERT INTO grants VALUES ('unreviewed')"); c.commit()
+ c=sqlite3.connect('file:'+sys.argv[2]+'?mode=rw',uri=True); c.execute("INSERT INTO grants VALUES ('unreviewed','add',1,'unreviewed')"); c.commit()
 except sqlite3.OperationalError: pass
 else: raise AssertionError('journal mutation succeeded')
 assert not os.path.exists('/var/run/docker.sock')
@@ -323,7 +395,9 @@ for host,port in [('127.0.0.1',int(sys.argv[3])),('198.51.100.1',443)]:
  finally: s.close()
 child=subprocess.run([sys.executable,'-c',"import sys;open(sys.argv[1],'rb')",paths[0]],capture_output=True)
 assert child.returncode != 0
-link='/tmp/host-secret-link'; os.symlink(paths[0],link)
+link='/tmp/host-secret-link'
+if os.path.lexists(link): os.unlink(link)
+os.symlink(paths[0],link)
 try: open(link,'rb')
 except (FileNotFoundError,PermissionError): pass
 else: raise AssertionError('symlink escaped')
@@ -349,37 +423,97 @@ print('ISOLATION_PROBE_PASSED')
         { expectFinal: true, timeoutMs: 120_000 },
       );
       void pending.catch(() => undefined);
-      const proposal = await Promise.race([
+      await Promise.race([
         reviewed.promise,
         failed.promise,
         pending.then(() => {
           throw new Error("turn ended before review");
         }),
       ]);
-      expect(proposal.authorityId).toBe(`agent:main:${SESSION}`);
-      expect(proposal.executionParams).toMatchObject(job);
-      expect(
-        await client.request("cron.replay.admit", {
-          operationId: replay.operationId,
-          effectId: replay.effectId,
-          authorityId: proposal.authorityId,
-          intent: proposal.intent,
-          maxAttempts: 1,
-          evidence: "host-isolation-review",
+      const proposals = await client.request<unknown>("scheduler.admission.pending", {});
+      expect(Array.isArray(proposals)).toBe(true);
+      if (!Array.isArray(proposals) || proposals.length !== 1 || !isRecord(proposals[0])) {
+        throw new Error("expected one host review proposal");
+      }
+      const proposal = proposals[0];
+      expect(proposal.plan).toMatchObject({
+        authorityId: `agent:main:${SESSION}`,
+        params: preparedJob!,
+        intent: preparedIntent,
+        operationId: replay.operationId,
+        effectId: replay.effectId,
+      });
+      const reader = await connectGatewayClient({
+        url: instance.url,
+        token: instance.gatewayToken,
+        scopes: ["operator.read"],
+      });
+      try {
+        await expect(reader.request("scheduler.admission.pending", {})).rejects.toThrow();
+        await expect(
+          reader.request("scheduler.admission.approve", {
+            reviewDigest: proposal.reviewDigest,
+            evidence: "reader-cannot-approve",
+          }),
+        ).rejects.toThrow();
+      } finally {
+        await disconnectGatewayClient(reader);
+      }
+      await expect(
+        client.request("scheduler.admission.approve", {
+          reviewDigest: "0".repeat(64),
+          evidence: "wrong-digest",
         }),
-      ).toEqual({ state: "prepared" });
+      ).rejects.toThrow();
+      await client.request("scheduler.admission.approve", {
+        reviewDigest: proposal.reviewDigest,
+        evidence: "host-isolation-review",
+      });
       admitted.resolve();
       expect(await Promise.race([pending, failed.promise])).toMatchObject({
         status: "ok",
         result: { payloads: expect.arrayContaining([expect.objectContaining({ text: COMPLETE })]) },
       });
-      expect(step).toBe(11);
-      expect(await fs.readFile(journal)).toEqual(journalBefore);
+      expect(step).toBe(15);
+      await disconnectGatewayClient(client);
+      client = undefined;
+      await instance.stopGateway();
+      await instance.startGateway();
+      client = await connectGatewayClient({
+        url: instance.url,
+        token: instance.gatewayToken,
+        scopes: ["operator.admin", "operator.read", "operator.write"],
+      });
+      expect(await client.request("scheduler.admission.pending", {})).toEqual([]);
+      pending = client.request(
+        "agent",
+        {
+          sessionKey: SESSION,
+          deliver: false,
+          idempotencyKey: randomUUID(),
+          message: "Retry the same reviewed automation after Gateway replacement.",
+        },
+        { expectFinal: true, timeoutMs: 120_000 },
+      );
+      expect(await Promise.race([pending, failed.promise])).toMatchObject({ status: "ok" });
+      expect(step).toBe(17);
+      const rows = JSON.parse(
+        await command("python3", [
+          "-c",
+          "import json,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(json.dumps({'effects':c.execute('SELECT count(*) FROM effects').fetchone()[0],'grants':c.execute('SELECT operation,effect,attempt,evidence FROM grants').fetchall()})); c.close()",
+          journal,
+        ]),
+      );
+      expect(rows).toEqual({
+        effects: 1,
+        grants: [[replay.operationId, replay.effectId, 1, "host-isolation-review"]],
+      });
       expect(await fs.readFile(secretPath)).toEqual(configBefore);
       await expect(fs.stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
       const serialized = JSON.stringify(requests);
       expect(serialized).not.toContain(instance.gatewayToken);
       expect(serialized).not.toContain(hostOnly);
+      expect(serialized).not.toContain("host-isolation-review");
       const ids = (await command("docker", ["ps", "-aq", "--filter", `name=^/${prefix}`]))
         .trim()
         .split(/\s+/)
