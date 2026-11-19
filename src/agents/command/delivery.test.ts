@@ -13,6 +13,7 @@ import { normalizeSessionDeliveryState } from "../../utils/delivery-context.shar
 import { buildRestartRecoveryTerminalDeliveryEvidence } from "../agent-command-restart-recovery.js";
 import { hasVisibleAgentPayload } from "../embedded-agent-runner/message-visibility.js";
 import { createAgentRunRestartAbortError } from "../run-termination.js";
+import { withCompletionBatchDeliveryContext } from "./delivery-result.js";
 import { deliverAgentCommandResult } from "./delivery.js";
 import type { AgentCommandOpts } from "./types.js";
 
@@ -1712,3 +1713,94 @@ describe("deliverAgentCommandResult payload normalization", () => {
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
+
+// Source-only additions: canonical execution/cost measurement deferred to parent owner.
+describe("parent final actual platform transport metadata", () => {
+  beforeEach(() => {
+    setActivePluginRegistry(slackRegistry);
+    deliverOutboundPayloadsMock.mockReset();
+    createReplyMediaPathNormalizerMock.mockReset();
+    createReplyMediaPathNormalizerMock.mockImplementation(
+      (..._args: unknown[]) =>
+        (payload: ReplyPayload) =>
+          Promise.resolve(payload),
+    );
+  });
+  afterEach(() => setActivePluginRegistry(emptyRegistry));
+  const owner = {
+    parentRunId: "parent-final",
+    requesterSessionKey: "agent:tester:main",
+    requesterSessionId: "parent-session",
+    admittedRunIds: ["represented", "omitted"],
+    representedRunIds: ["represented"],
+    omittedRunIds: ["omitted"],
+    isCurrent: () => true,
+  };
+  const sendFinal = () =>
+    withCompletionBatchDeliveryContext(
+      owner,
+      async () =>
+        await deliverAgentCommandResultForTest({
+          payloads: [{ text: "acknowledged" }],
+          opts: {
+            runId: owner.parentRunId,
+            sessionKey: owner.requesterSessionKey,
+            bestEffortDeliver: true,
+          },
+          sessionEntry: { sessionId: owner.requesterSessionId, updatedAt: 1 },
+        }),
+    );
+
+  it("retains actual complete send identities without changing aggregate count/status", async () => {
+    setActivePluginRegistry(slackRegistry);
+    deliverOutboundPayloadsMock.mockResolvedValueOnce([
+      { channel: "slack", messageId: "actual-first" },
+      { channel: "slack", messageId: "actual-second" },
+    ]);
+    const delivered = await sendFinal();
+    expect(delivered.deliveryStatus).toMatchObject({
+      status: "sent",
+      succeeded: true,
+      resultCount: 2,
+      platformMessageIds: ["actual-first", "actual-second"],
+      completionBatchTransport: {
+        kind: "completion-batch-message",
+        parentRunId: owner.parentRunId,
+        representedRunIds: ["represented"],
+        omittedRunIds: ["omitted"],
+        platformMessageIds: ["actual-first", "actual-second"],
+        transportStatus: "complete",
+        reportDelivery: "UNKNOWN",
+      },
+    });
+  });
+
+  it("retains the first actual identity after a later partial-send failure", async () => {
+    setActivePluginRegistry(slackRegistry);
+    deliverOutboundPayloadsMock.mockImplementationOnce(async (params: unknown) => {
+      (
+        params as { onPayloadDeliveryOutcome?: (outcome: unknown) => void }
+      ).onPayloadDeliveryOutcome?.({
+        index: 1,
+        status: "failed",
+        error: new Error("later part failed"),
+        sentBeforeError: true,
+        stage: "platform_send",
+      });
+      return [{ channel: "slack", messageId: "actual-first" }];
+    });
+    const delivered = await sendFinal();
+    expect(delivered.deliverySucceeded).toBe(false);
+    expect(delivered.deliveryStatus).toMatchObject({
+      status: "partial_failed",
+      succeeded: "partial",
+      resultCount: 1,
+      platformMessageIds: ["actual-first"],
+      completionBatchTransport: {
+        transportStatus: "partial",
+        platformMessageIds: ["actual-first"],
+        reportDelivery: "UNKNOWN",
+      },
+    });
+  });
+});

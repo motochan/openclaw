@@ -26,7 +26,8 @@ import {
   readLatestSubagentOutputWithRetryUsing,
 } from "./subagent-announce-capture.js";
 import {
-  buildChildCompletionFindings,
+  buildChildCompletionFindingsWithRuns,
+  type ChildCompletionFindings,
   readSubagentRunAnnounceResultUsing,
   type ChildCompletionRow,
   type PreparedAnnounceResult,
@@ -369,7 +370,7 @@ export async function readSubagentRunAnnounceResult(
 /** Prepare complete result text without changing the bounded lifecycle evidence. */
 export async function readChildCompletionFindings(
   children: Array<ChildCompletionRow & { runId: string }>,
-): Promise<PreparedAnnounceResult> {
+): Promise<PreparedAnnounceResult & ChildCompletionFindings> {
   const results = await Promise.all(
     children.map(async (child) => ({
       child,
@@ -381,8 +382,9 @@ export async function readChildCompletionFindings(
     throw new Error("A child result changed while preparing the completion batch.");
   }
   return {
-    text: buildChildCompletionFindings(
+    ...buildChildCompletionFindingsWithRuns(
       results.map(({ child, text }) => ({
+        runId: child.runId,
         childSessionKey: child.childSessionKey,
         task: child.task,
         taskName: child.taskName,

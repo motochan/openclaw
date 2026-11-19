@@ -35,6 +35,8 @@ export type SubagentAnnounceDeliveryResult = {
   path: SubagentDeliveryPath;
   deliveredAt?: number;
   enqueuedAt?: number;
+  /** Positive exact-run transport evidence only; absent never proves nondelivery. */
+  completionTransportEvidence?: import("./subagent-completion-transport-evidence.js").CompletionTransportEvidence;
   /** Direct delivery that already committed the requester's visible final. */
   requesterVisibleFinalDelivered?: true;
   storeReplaced?: true;

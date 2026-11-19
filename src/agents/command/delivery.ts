@@ -64,6 +64,7 @@ import {
 } from "./delivery-authority.js";
 import {
   buildDeliveryResult,
+  readCompletionBatchMessageTransport,
   type AgentCommandDeliveryResult,
   type AgentCommandDeliveryStatus,
 } from "./delivery-result.js";
@@ -155,6 +156,26 @@ function deliveryStatusFromDurableSend(send: DurableSendResult): AgentCommandDel
   const payloadOutcomes = serializeDurableMessagePayloadOutcomes(send.payloadOutcomes, {
     includeHookEffect: true,
   });
+  // Preserve positive identities without allowing optional diagnostics to interrupt a send.
+  let platformMessageIds: readonly string[] | undefined;
+  try {
+    if (send.status === "sent" || send.status === "partial_failed") {
+      platformMessageIds = Object.freeze([
+        ...new Set(
+          send.results
+            .filter((result) => result.outcome !== "not_sent")
+            .flatMap((result) => [
+              result.messageId,
+              ...(result.receipt?.platformMessageIds ?? []),
+              ...(result.receipt?.parts.map((part) => part.platformMessageId) ?? []),
+            ])
+            .filter((id) => typeof id === "string" && id.trim().length > 0),
+        ),
+      ]);
+    }
+  } catch {
+    // Missing identity metadata is unconfirmed, not proven lost or complete.
+  }
   switch (send.status) {
     case "sent":
       return {
@@ -163,6 +184,7 @@ function deliveryStatusFromDurableSend(send: DurableSendResult): AgentCommandDel
         status: "sent",
         succeeded: true,
         resultCount: send.results.length,
+        ...(platformMessageIds ? { platformMessageIds } : {}),
         ...(payloadOutcomes ? { payloadOutcomes } : {}),
       };
     case "suppressed":
@@ -184,6 +206,7 @@ function deliveryStatusFromDurableSend(send: DurableSendResult): AgentCommandDel
         error: true,
         errorMessage: formatErrorMessage(send.error),
         resultCount: send.results.length,
+        ...(platformMessageIds ? { platformMessageIds } : {}),
         sentBeforeError: true,
         ...(payloadOutcomes ? { payloadOutcomes } : {}),
       };
@@ -882,6 +905,15 @@ export async function deliverAgentCommandResult(
         throw restartAbort.signal.reason;
       }
       deliveryStatus = deliveryStatusFromDurableSend(send);
+      const completionBatchTransport = readCompletionBatchMessageTransport({
+        parentRunId: opts.runId,
+        requesterSessionKey: effectiveSessionKey,
+        requesterSessionId: sessionEntry?.sessionId,
+        status: deliveryStatus,
+      });
+      if (completionBatchTransport) {
+        deliveryStatus.completionBatchTransport = completionBatchTransport;
+      }
       if (!bestEffortDeliver && (send.status === "failed" || send.status === "partial_failed")) {
         emitJsonEnvelope(deliveryStatus);
         captureDeliveryResult(

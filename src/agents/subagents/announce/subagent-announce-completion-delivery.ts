@@ -1,6 +1,8 @@
 /**
  * Requester completion calls, direct fallback, and source-delivery evidence.
  */
+import { collectCompletionTransportEvidence } from "./subagent-completion-transport-evidence.js";
+import type { OutboundDeliveryResult } from "../../../infra/outbound/deliver-types.js";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { sanitizePendingFinalDeliveryText } from "../../../auto-reply/reply/pending-final-delivery-state.js";
 import {
@@ -257,7 +259,7 @@ function resolveTextCompletionDirectFallback(
   contentKind: "completed_result" | "failed_notice",
 ) {
   if (contentKind === "failed_notice") {
-    return FAILED_COMPLETION_NOTICE;
+    return { content: FAILED_COMPLETION_NOTICE, event: undefined };
   }
   for (let index = (events?.length ?? 0) - 1; index >= 0; index -= 1) {
     const event = events?.[index];
@@ -276,7 +278,7 @@ function resolveTextCompletionDirectFallback(
         ? sanitizeAgentRunTerminalReplyText(sanitizePendingFinalDeliveryText(event.result))
         : "";
     if (result) {
-      return result;
+      return { content: result, event };
     }
   }
   return undefined;
@@ -300,7 +302,8 @@ export async function deliverCompletionDirect(params: {
   onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void;
   isSourceSessionEffectsAllowed?: () => boolean;
 }): Promise<SubagentAnnounceDeliveryResult | undefined> {
-  const content = resolveTextCompletionDirectFallback(params.internalEvents, params.contentKind);
+  const selected = resolveTextCompletionDirectFallback(params.internalEvents, params.contentKind);
+  const content = selected?.content;
   if (
     !content ||
     !params.deliveryTarget.deliver ||
@@ -318,6 +321,16 @@ export async function deliverCompletionDirect(params: {
   if (!agentId) {
     return undefined;
   }
+  const selectedEvent = selected?.event;
+  const identifiedResults: OutboundDeliveryResult[] = [];
+  const evidence = (complete: boolean) => selectedEvent ? collectCompletionTransportEvidence({
+    childRunId: selectedEvent.childRunId,
+    childSessionKey: selectedEvent.childSessionKey,
+    requesterSessionKey: params.requesterSessionKey,
+    target: params.deliveryTarget,
+    results: identifiedResults,
+    complete,
+  }) : undefined;
   const idempotencyKey = `${params.directIdempotencyKey}:text-direct`;
   let committedDelivery: SubagentAnnounceDeliveryResult | undefined;
   try {
@@ -346,13 +359,17 @@ export async function deliverCompletionDirect(params: {
           throw new SourceOwnerChangedError();
         }
       },
-      onDeliveryResult: () => {
+      onDeliveryResult: (result) => {
+        identifiedResults.push(result);
         if (committedDelivery) {
           return;
         }
         // Platform identity is committed before transcript mirroring, which
         // may wait behind the requester's still-active SQLite writer.
-        committedDelivery = { delivered: true, path: "direct", deliveredAt: Date.now() };
+        committedDelivery = {
+          delivered: true, path: "direct", deliveredAt: Date.now(),
+          completionTransportEvidence: evidence(false),
+        };
         params.onDeliveryResult?.(committedDelivery);
       },
       mirror: {
@@ -362,6 +379,8 @@ export async function deliverCompletionDirect(params: {
       },
     });
     if (committedDelivery) {
+      // Only the completed send owner can attest all content; first-part callbacks cannot.
+      committedDelivery.completionTransportEvidence = evidence(sendResult.deliveryStatus === "sent");
       return committedDelivery;
     }
     if (sendResult.deliveryStatus === "suppressed") {

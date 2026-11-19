@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { SerializedDurableMessagePayloadOutcome } from "../../channels/message/runtime.js";
 import type { projectOutboundPayloadPlanForJson } from "../../infra/outbound/payloads.js";
 import { hasAnyNonEmptyString as hasNonEmptyStringArray } from "../delivery-evidence-values.js";
@@ -19,6 +20,9 @@ export type AgentCommandDeliveryStatus = {
   /** Free-form lowercase_snake reason from durable delivery or preflight validation. */
   reason?: string;
   resultCount?: number;
+  /** Positive actual identities; absent/empty does not prove loss. */
+  platformMessageIds?: readonly string[];
+  completionBatchTransport?: CompletionBatchMessageTransport;
   sentBeforeError?: true;
   payloadOutcomes?: SerializedDurableMessagePayloadOutcome[];
 };
@@ -99,4 +103,84 @@ export function buildDeliveryResult(params: {
       : {}),
     ...(params.deliveryStatus ? { deliveryStatus: params.deliveryStatus } : {}),
   };
+}
+
+/** Parent-message transport only; never an exact child-report delivery receipt. */
+export type CompletionBatchMessageTransport = {
+  kind: "completion-batch-message";
+  parentRunId: string;
+  requesterSessionKey: string;
+  requesterSessionId: string;
+  admittedRunIds: readonly string[];
+  representedRunIds: readonly string[];
+  omittedRunIds: readonly string[];
+  reportDelivery: "UNKNOWN";
+  transportStatus: "complete" | "partial";
+  platformMessageIds: readonly string[];
+};
+
+type CompletionBatchDeliveryContext = Omit<
+  CompletionBatchMessageTransport,
+  "kind" | "reportDelivery" | "transportStatus" | "platformMessageIds"
+> & { isCurrent: () => boolean };
+
+// Native lexical owner attribution, not permission or public request metadata.
+// Existing admission and platform-send guards retain exclusive authority.
+const completionBatchDeliveryContext = new AsyncLocalStorage<CompletionBatchDeliveryContext>();
+
+export async function withCompletionBatchDeliveryContext<T>(
+  context: CompletionBatchDeliveryContext,
+  run: () => Promise<T>,
+): Promise<T> {
+  let active = true;
+  const captured = {
+    ...context,
+    admittedRunIds: Object.freeze([...context.admittedRunIds]),
+    representedRunIds: Object.freeze([...context.representedRunIds]),
+    omittedRunIds: Object.freeze([...context.omittedRunIds]),
+    isCurrent: () => active && context.isCurrent(),
+  };
+  try {
+    return await completionBatchDeliveryContext.run(captured, run);
+  } finally {
+    active = false;
+  }
+}
+
+export function readCompletionBatchMessageTransport(params: {
+  parentRunId?: string;
+  requesterSessionKey?: string;
+  requesterSessionId?: string;
+  status: AgentCommandDeliveryStatus;
+}): CompletionBatchMessageTransport | undefined {
+  const context = completionBatchDeliveryContext.getStore();
+  try {
+    if (
+      !context ||
+      context.parentRunId !== params.parentRunId ||
+      context.requesterSessionKey !== params.requesterSessionKey ||
+      context.requesterSessionId !== params.requesterSessionId ||
+      !context.isCurrent() ||
+      (params.status.status !== "sent" && params.status.status !== "partial_failed") ||
+      !params.status.platformMessageIds?.length ||
+      context.representedRunIds.some((id) => !context.admittedRunIds.includes(id))
+    ) {
+      return undefined;
+    }
+    return {
+      kind: "completion-batch-message",
+      parentRunId: context.parentRunId,
+      requesterSessionKey: context.requesterSessionKey,
+      requesterSessionId: context.requesterSessionId,
+      admittedRunIds: context.admittedRunIds,
+      representedRunIds: context.representedRunIds,
+      omittedRunIds: context.omittedRunIds,
+      reportDelivery: "UNKNOWN",
+      transportStatus: params.status.status === "sent" ? "complete" : "partial",
+      platformMessageIds: params.status.platformMessageIds,
+    };
+  } catch {
+    // Optional attribution failures cannot abort delivery or invent healthy evidence.
+    return undefined;
+  }
 }

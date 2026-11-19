@@ -27,6 +27,7 @@ import {
   getSubagentSessionStartedAt,
 } from "./subagent-registry-read.js";
 import type { SubagentRunReadRecord } from "./subagent-registry-read.types.js";
+import { isBoundCompletionTransportEvidence } from "./subagent-registry.store.codec.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import { shouldKeepSubagentRunChildLink } from "./subagent-run-liveness.js";
 import { buildSubagentRunView } from "./subagent-run-view.js";
@@ -50,6 +51,10 @@ type SubagentListItem = {
   startedAt?: number;
   endedAt?: number;
   execution: SubagentExecutionObservation;
+  completionTransportEvidence?: NonNullable<
+    SubagentRunRecord["delivery"]
+  >["completionTransportEvidence"];
+  completionTransportStatus: "DELIVERED" | "UNKNOWN";
   deliveryStatus?: NonNullable<SubagentRunRecord["delivery"]>["status"];
 };
 
@@ -244,6 +249,22 @@ export function buildSubagentList(params: {
     const taskName = entry.taskName?.trim();
     const taskNamePrefix = taskName ? `${taskName}: ` : "";
     const line = `${index}. ${taskNamePrefix}${label} (${resolveModelDisplay(sessionEntry, entry.model)}, ${runtime}${usageText ? `, ${usageText}` : ""}) ${status}${normalizeLowercaseStringOrEmpty(task) !== normalizeLowercaseStringOrEmpty(label) ? ` - ${task}` : ""}`;
+    const candidate = entry.delivery?.completionTransportEvidence;
+    const receipt =
+      candidate && isBoundCompletionTransportEvidence(entry, candidate)
+        ? {
+            childRunId: candidate.childRunId,
+            childSessionKey: candidate.childSessionKey,
+            requesterSessionKey: candidate.requesterSessionKey,
+            channel: candidate.channel,
+            to: candidate.to,
+            ...(candidate.accountId ? { accountId: candidate.accountId } : {}),
+            ...(candidate.threadId ? { threadId: candidate.threadId } : {}),
+            platformMessageIds: [...candidate.platformMessageIds],
+            scope: candidate.scope,
+            ...(candidate.durable === true ? { durable: true as const } : {}),
+          }
+        : undefined;
     const view: SubagentListItem = {
       index,
       line,
@@ -255,6 +276,14 @@ export function buildSubagentList(params: {
       status,
       execution,
       ...(entry.delivery ? { deliveryStatus: entry.delivery.status } : {}),
+      // The existing prepared requester tree owns visibility; never enumerate other rows here.
+      ...(receipt ? { completionTransportEvidence: receipt } : {}),
+      completionTransportStatus:
+        entry.delivery?.status === "delivered" &&
+        receipt?.durable === true &&
+        receipt.scope === "complete"
+          ? "DELIVERED"
+          : "UNKNOWN",
       pendingDescendants,
       runtime,
       runtimeMs,

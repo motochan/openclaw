@@ -606,6 +606,7 @@ async function runSubagentAnnounceFlowBound(
         source: announceType === "cron job" ? "cron" : "subagent",
         childSessionKey: params.childSessionKey,
         childSessionId: announceSessionId,
+        childRunId: params.childRunId,
         announceType,
         taskLabel,
         status: outcome.status,
@@ -620,11 +621,23 @@ async function runSubagentAnnounceFlowBound(
     const triggerMessage = buildAnnounceSteerMessage(internalEvents);
     const directIdempotencyKey = buildAnnounceIdempotencyKey(announceId);
     let deliveryResultReported = false;
+    let reportedTransportRunId: string | undefined;
+    let reportedTransportScope: "partial" | "complete" | undefined;
     const reportDeliveryResult = (delivery: SubagentAnnounceDeliveryResult) => {
-      if (deliveryResultReported) {
+      const evidence = delivery.completionTransportEvidence;
+      // Preserve first-part custody, then allow exactly its send-owner completion upgrade.
+      const promotesTransport =
+        delivery.delivered &&
+        delivery.path === "direct" &&
+        reportedTransportScope === "partial" &&
+        evidence?.scope === "complete" &&
+        evidence.childRunId === reportedTransportRunId;
+      if (deliveryResultReported && !promotesTransport) {
         return;
       }
       deliveryResultReported = true;
+      reportedTransportRunId = evidence?.childRunId;
+      reportedTransportScope = evidence?.scope;
       params.onDeliveryResult?.(delivery);
     };
     const delivery = await deliverSubagentAnnouncement({

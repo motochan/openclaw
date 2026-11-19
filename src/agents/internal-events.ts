@@ -34,6 +34,8 @@ type AgentTaskCompletionInternalEvent = {
   source: AgentInternalEventSource;
   childSessionKey: string;
   childSessionId?: string;
+  /** Canonical producing run; never inferred from the label or child session. */
+  childRunId?: string;
   announceType: string;
   taskLabel: string;
   status: AgentInternalEventStatus;

@@ -22,6 +22,7 @@ export type SubagentLifecycleOptions = {
   getRuntimeConfig(): OpenClawConfig;
   persist(...runIds: string[]): void;
   persistOrThrow(...runIds: string[]): void;
+  persistDeliveryAsync?: typeof import("./subagent-registry-state.js").persistSubagentRunsToDiskAsyncOrThrow;
   clearPendingLifecycleError(runId: string): void;
   countPendingDescendantRuns(rootSessionKey: string): number;
   getLatestRunForChildSession(

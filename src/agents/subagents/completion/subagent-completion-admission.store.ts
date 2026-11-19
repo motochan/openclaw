@@ -52,7 +52,11 @@ import {
 } from "../registry/subagent-registry-lifecycle-delivery.js";
 import { subagentRuns } from "../registry/subagent-registry-memory.js";
 import { publishSubagentRunsAfterAtomicStore } from "../registry/subagent-registry-state.js";
-import { bindSubagentRunRecord } from "../registry/subagent-registry.store.codec.js";
+import {
+  publishCommittedCompletionTransportEvidence,
+  retainCompletionTransportEvidence,
+  bindSubagentRunRecord,
+} from "../registry/subagent-registry.store.codec.js";
 import {
   deleteSubagentRunRowInDatabase,
   upsertSubagentRunRowInDatabase,
@@ -482,6 +486,14 @@ function commitCompletionMutations(
       if (retire) {
         subagentRuns.delete(subagent.runId);
       } else {
+        try {
+          publishCommittedCompletionTransportEvidence(subagent);
+        } catch (error) {
+          if (subagent.delivery?.completionTransportEvidence) {
+            delete subagent.delivery.completionTransportEvidence.durable;
+          }
+          log.warn("Committed completion custody confirmation unavailable", { error });
+        }
         replaceCommittedSubagent(subagent);
       }
     }
@@ -653,6 +665,8 @@ export function settleRequesterCompletionBatch(params: {
             mutation = blocked;
           }
         }
+        // A selected direct fallback receipt belongs to one exact run, NOT the cohort.
+        retainCompletionTransportEvidence(mutation.subagent, params.outcome);
         const settled = mutation.subagent;
         if (settled.pauseReason !== "sessions_yield") {
           if (settled.requesterTurnRunId && settled.expectsCompletionMessage === true) {

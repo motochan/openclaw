@@ -1,5 +1,6 @@
 import { getGatewayContextResolver } from "../../../plugins/runtime/gateway-request-scope.js";
 import { defaultRuntime } from "../../../runtime.js";
+import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.js";
 import { normalizeDeliveryContext } from "../../../utils/delivery-context.shared.js";
 import { resolveSubagentRequesterAgentId } from "../../subagent-requester-owner.js";
 import {
@@ -45,6 +46,12 @@ import {
   safeSetSubagentTaskDeliveryStatus,
 } from "./subagent-registry-lifecycle-delivery.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
+import { persistSubagentRunsToDiskAsyncOrThrow } from "./subagent-registry-state.js";
+import {
+  confirmCompletionTransportEvidenceReadback,
+  isBoundCompletionTransportEvidence,
+  retainCompletionTransportEvidence,
+} from "./subagent-registry.store.codec.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import { deleteSubagentSessionForCleanup } from "./subagent-session-cleanup.js";
 import { loadSubagentSessionEntry } from "./subagent-session-reconciliation.js";
@@ -571,6 +578,55 @@ export const startSubagentAnnounceCleanupFlow = (
     );
   };
 
+  // Diagnostic custody cannot reject the sender between multipart chunks.
+  // The maintained detached cleanup owner joins publication before finalization.
+  let custodyWrites: Promise<void> = Promise.resolve();
+  const persistDeliveryCustody = () => {
+    const evidence = entry.delivery?.completionTransportEvidence;
+    const ownerDelivery = entry.delivery;
+    let workerContext: ReturnType<typeof captureOpenClawStateWorkerContext>;
+    try {
+      workerContext = captureOpenClawStateWorkerContext();
+    } catch (error) {
+      if (evidence) delete evidence.durable;
+      params.warn("Completion transport custody UNKNOWN", { runId, error });
+      return;
+    }
+    custodyWrites = custodyWrites
+      .then(async () => {
+        const isCurrent = () =>
+          context.isCleanupAttemptCurrent(runId, entry, cleanupGeneration) &&
+          entry.delivery === ownerDelivery &&
+          entry.delivery?.completionTransportEvidence === evidence &&
+          (!evidence || isBoundCompletionTransportEvidence(entry, evidence));
+        if (!isCurrent()) return;
+        try {
+          await (params.persistDeliveryAsync ?? persistSubagentRunsToDiskAsyncOrThrow)(
+            params.runs,
+            [runId],
+            {
+              context: workerContext,
+              assertCurrent: () => {
+                if (!isCurrent()) throw new Error("Completion custody owner changed");
+              },
+              onCommitted: (snapshot, runIds) => {
+                // The maintained writer publishes this exact acknowledged snapshot.
+                if (isCurrent() && runIds.includes(runId)) {
+                  confirmCompletionTransportEvidenceReadback(entry, snapshot.get(runId) ?? null);
+                }
+              },
+            },
+          );
+        } catch (error) {
+          if (evidence) delete evidence.durable;
+          params.warn("Completion transport custody UNKNOWN", { runId, error });
+        }
+      })
+      .catch((error: unknown) => {
+        if (evidence) delete evidence.durable;
+        params.warn("Completion transport custody UNKNOWN", { runId, error });
+      });
+  };
   const announceParams: Parameters<RunSubagentAnnounceFlow>[0] = {
     childSessionKey: pendingPayload.childSessionKey,
     childRunId: pendingPayload.childRunId,
@@ -644,6 +700,13 @@ export const startSubagentAnnounceCleanupFlow = (
       }
       // A stale announce cannot replace a delivery already committed by requester-settle.
       if (entry.delivery?.status === "delivered") {
+        // Only this exact send owner can promote its earlier first-part receipt.
+        if (
+          committedDelivery === entry.delivery &&
+          retainCompletionTransportEvidence(entry, delivery)
+        ) {
+          persistDeliveryCustody();
+        }
         return;
       }
       // A late failure cannot rearm an announcement transferred to the batch.
@@ -651,6 +714,7 @@ export const startSubagentAnnounceCleanupFlow = (
       if (!delivery.delivered && requesterTookCompletion()) {
         return;
       }
+      retainCompletionTransportEvidence(entry, delivery);
       recordAnnounceDeliveryResult(entry, delivery, params.runs);
       if (delivery.delivered) {
         const deliveryState = ensureDeliveryState(entry);
@@ -661,7 +725,7 @@ export const startSubagentAnnounceCleanupFlow = (
         clearSubagentPendingDelivery(entry);
         // Identified platform delivery precedes best-effort transcript
         // mirroring; task ownership must become durable at that same edge.
-        params.persist(runId);
+        persistDeliveryCustody();
         safeSetSubagentTaskDeliveryStatus(params, {
           entry,
           deliveryStatus: "delivered",
@@ -742,6 +806,7 @@ export const startSubagentAnnounceCleanupFlow = (
       } finally {
         clearTimeout(deadlineTimer);
       }
+      await custodyWrites;
       await finalizeAnnounceCleanup(announceOutcome);
     },
   });

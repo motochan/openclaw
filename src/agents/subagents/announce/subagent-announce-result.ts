@@ -159,6 +159,8 @@ type ChildCompletionExecution = CompletionResultSource["execution"] & {
 };
 
 export type ChildCompletionRow = {
+  /** Legacy formatting callers may lack identity; never credit those rows. */
+  runId?: string;
   announceResult?: string;
   childSessionKey: string;
   task: string;
@@ -178,9 +180,23 @@ function hasCapturedChildCompletionReply(child: ChildCompletionRow): boolean {
   );
 }
 
+export type ChildCompletionFindings = {
+  text: string | undefined;
+  representedRunIds: readonly string[];
+  omittedRunIds: readonly string[];
+  unidentifiedRowCount: number;
+};
+
 export function buildChildCompletionFindings(
   children: Array<ChildCompletionRow>,
 ): string | undefined {
+  return buildChildCompletionFindingsWithRuns(children).text;
+}
+
+/** Prompt material membership, not semantic relay in a generated final. */
+export function buildChildCompletionFindingsWithRuns(
+  children: Array<ChildCompletionRow>,
+): ChildCompletionFindings {
   const sorted = [...children].toSorted((a, b) => {
     if (a.createdAt !== b.createdAt) {
       return a.createdAt - b.createdAt;
@@ -202,7 +218,13 @@ export function buildChildCompletionFindings(
   });
 
   const sections: string[] = [];
+  const representedRunIds = new Set<string>();
+  const omittedRunIds = new Set<string>();
+  let unidentifiedRowCount = 0;
   for (const [index, child] of sorted.entries()) {
+    if (!child.runId) {
+      unidentifiedRowCount++;
+    }
     const resultText = child.announceResult ?? resolveSubagentCompletionResultText(child);
     const outcome = describeSubagentOutcome(child);
     if (
@@ -210,7 +232,13 @@ export function buildChildCompletionFindings(
       !resultText &&
       hasCapturedChildCompletionReply(child)
     ) {
+      if (child.runId) {
+        omittedRunIds.add(child.runId);
+      }
       continue;
+    }
+    if (child.runId) {
+      representedRunIds.add(child.runId);
     }
     const title =
       child.taskName?.trim() ||
@@ -233,9 +261,13 @@ export function buildChildCompletionFindings(
     );
   }
 
-  if (sections.length === 0) {
-    return undefined;
-  }
-
-  return ["Child completion results:", "", ...sections].join("\n\n");
+  return {
+    text:
+      sections.length === 0
+        ? undefined
+        : ["Child completion results:", "", ...sections].join("\n\n"),
+    representedRunIds: Object.freeze([...representedRunIds]),
+    omittedRunIds: Object.freeze([...omittedRunIds]),
+    unidentifiedRowCount,
+  };
 }

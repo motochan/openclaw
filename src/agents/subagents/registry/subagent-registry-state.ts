@@ -320,7 +320,6 @@ export function persistSubagentRunsToDiskAsyncOrThrow(
   options: SubagentRegistryWriteOptions,
 ): Promise<void> {
   return persistSubagentRegistryChangesAsync(runs, changedRunIds, options, (snapshot, runIds) => {
-    options.onCommitted?.();
     subagentRuns.settleCompletionAuthorities(snapshot, runIds);
     const keys = rememberPersistedSubagentRunsSnapshot(snapshot, runIds, {
       databasePath: options.context.admission.databasePath,
@@ -328,6 +327,7 @@ export function persistSubagentRunsToDiskAsyncOrThrow(
     const events = updateCommittedSwarmNotifications(snapshot, runIds);
     emitSubagentRegistryPersisted(keys);
     events.forEach(emitSessionLifecycleEvent);
+    options.onCommitted?.(snapshot, runIds);
   });
 }
 

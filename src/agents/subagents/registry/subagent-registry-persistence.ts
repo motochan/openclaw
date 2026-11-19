@@ -4,7 +4,10 @@ import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state
 import type { OpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.types.js";
 import { runOpenClawStateWorkerOperation } from "../../../state/openclaw-state-worker-store.js";
 import { normalizeSubagentRunState } from "./subagent-delivery-state.js";
-import { bindCapturedSubagentRunRecord } from "./subagent-registry.store.codec.js";
+import {
+  bindCapturedSubagentRunRecord,
+  publishCommittedCompletionTransportEvidence,
+} from "./subagent-registry.store.codec.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 type PendingRegistryWrite = { runIds: Set<string>; superseded: Set<string> };
@@ -34,7 +37,7 @@ export class SubagentRegistryWriteError extends Error {
 export type SubagentRegistryWriteOptions = {
   context: OpenClawStateWorkerContext;
   assertCurrent?: () => void;
-  onCommitted?: () => void;
+  onCommitted?: (snapshot: Map<string, SubagentRunRecord>, runIds: readonly string[]) => void;
 };
 
 /** Retains captured rows, original database admission, and publication through actor settlement. */
@@ -90,6 +93,19 @@ export async function persistSubagentRegistryChangesAsync(
         assertDatabase();
         const currentIds = runIds.filter((runId) => !pending.superseded.has(runId));
         if (currentIds.length > 0) {
+          // The worker acknowledges this exact write only after COMMIT.
+          for (const runId of currentIds) {
+            const entry = snapshot.get(runId);
+            if (entry) {
+              try {
+                publishCommittedCompletionTransportEvidence(entry);
+              } catch {
+                if (entry.delivery?.completionTransportEvidence) {
+                  delete entry.delivery.completionTransportEvidence.durable;
+                }
+              }
+            }
+          }
           publish(snapshot, currentIds);
         }
       },

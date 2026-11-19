@@ -40,6 +40,10 @@ export type SubagentCompletionDeliveryState = {
     | "failed"
     | "suspended"
     | "discarded";
+  /** Owner-issued positive transport metadata; absent on older rows (UNKNOWN). */
+  completionTransportEvidence?: import("../announce/subagent-completion-transport-evidence.js").CompletionTransportEvidence & {
+    durable?: true;
+  };
   payload?: PendingFinalDeliveryPayload;
   createdAt?: number;
   enqueuedAt?: number;

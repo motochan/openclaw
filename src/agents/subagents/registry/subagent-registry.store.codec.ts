@@ -3,9 +3,102 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { Selectable } from "kysely";
 import type { DB as OpenClawStateKyselyDatabase } from "../../../state/openclaw-state-db.generated.js";
 import { normalizeDeliveryContext } from "../../../utils/delivery-context.shared.js";
+import type { SubagentAnnounceDeliveryResult } from "../announce/subagent-announce-dispatch.js";
+import type { CompletionTransportEvidence } from "../announce/subagent-completion-transport-evidence.js";
 import { normalizeSubagentRunState } from "./subagent-delivery-state.js";
 import type { BoundSubagentRunRecord } from "./subagent-registry.store.kernel.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+
+/** Validate exact owner identities and route, never labels, timestamps or transcript text. */
+export function isBoundCompletionTransportEvidence(
+  entry: SubagentRunRecord,
+  value: unknown,
+): value is CompletionTransportEvidence & { durable?: true } {
+  if (!isRecord(value)) return false;
+  const origin = entry.requesterOrigin;
+  return (
+    value.childRunId === entry.runId &&
+    value.childSessionKey === entry.childSessionKey &&
+    value.requesterSessionKey === entry.requesterSessionKey &&
+    typeof value.channel === "string" &&
+    !!value.channel &&
+    typeof value.to === "string" &&
+    !!value.to &&
+    !!origin &&
+    origin.channel === value.channel &&
+    origin.to === value.to &&
+    (origin.accountId ?? undefined) === (value.accountId ?? undefined) &&
+    (origin.threadId == null ? undefined : String(origin.threadId)) ===
+      (value.threadId ?? undefined) &&
+    (value.scope === "partial" || value.scope === "complete") &&
+    Array.isArray(value.platformMessageIds) &&
+    value.platformMessageIds.length > 0 &&
+    value.platformMessageIds.length <= 100 &&
+    value.platformMessageIds.every(
+      (id) =>
+        typeof id === "string" &&
+        !!id.trim() &&
+        id.length <= 1024 &&
+        id !== "unknown" &&
+        id !== "suppressed",
+    )
+  );
+}
+
+/** Called only by existing completion owners after their authority checks. */
+export function retainCompletionTransportEvidence(
+  entry: SubagentRunRecord,
+  outcome: SubagentAnnounceDeliveryResult,
+): boolean {
+  const evidence = outcome.completionTransportEvidence;
+  if (
+    !outcome.delivered ||
+    outcome.path !== "direct" ||
+    !isBoundCompletionTransportEvidence(entry, evidence)
+  )
+    return false;
+  if (entry.delivery?.completionTransportEvidence?.scope === "complete") return false;
+  entry.delivery ??= { status: "pending" };
+  // A callback is tentative until the canonical owner commits and reads it back.
+  entry.delivery.completionTransportEvidence = {
+    childRunId: evidence.childRunId,
+    childSessionKey: evidence.childSessionKey,
+    requesterSessionKey: evidence.requesterSessionKey,
+    channel: evidence.channel,
+    to: evidence.to,
+    ...(evidence.accountId ? { accountId: evidence.accountId } : {}),
+    ...(evidence.threadId ? { threadId: evidence.threadId } : {}),
+    platformMessageIds: [...evidence.platformMessageIds],
+    scope: evidence.scope,
+  };
+  return true;
+}
+
+/** Invoked only by the maintained writer after its exact commit acknowledgement. */
+export function publishCommittedCompletionTransportEvidence(entry: SubagentRunRecord): void {
+  const evidence = entry.delivery?.completionTransportEvidence;
+  if (evidence && isBoundCompletionTransportEvidence(entry, evidence)) {
+    evidence.durable = true;
+  }
+}
+
+/** Only a canonical store readback can publish durable=true. */
+export function confirmCompletionTransportEvidenceReadback(
+  entry: SubagentRunRecord,
+  stored: SubagentRunRecord | null,
+): void {
+  const evidence = entry.delivery?.completionTransportEvidence;
+  const receipt = stored?.delivery?.completionTransportEvidence;
+  if (
+    evidence &&
+    receipt?.durable === true &&
+    isBoundCompletionTransportEvidence(entry, receipt) &&
+    JSON.stringify({ ...evidence, durable: undefined }) ===
+      JSON.stringify({ ...receipt, durable: undefined })
+  ) {
+    evidence.durable = true;
+  }
+}
 
 type SubagentRunsTable = OpenClawStateKyselyDatabase["subagent_runs"];
 export type SubagentRunSqliteRow = Selectable<SubagentRunsTable>;
@@ -81,7 +174,25 @@ export function rowToSubagentRunRecord(row: SubagentRunSqliteRow): SubagentRunRe
   if (payload.expectsCompletionMessage === false) {
     payload.delivery.status = "not_required";
   }
+  // Indexed identity is authoritative, including when a damaged payload disagrees.
+  if (
+    payload.delivery.completionTransportEvidence &&
+    !isBoundCompletionTransportEvidence(payload, payload.delivery.completionTransportEvidence)
+  ) {
+    delete payload.delivery.completionTransportEvidence;
+  }
   const record = normalizeSubagentRunState(payload);
+  if (record.delivery?.completionTransportEvidence) {
+    const evidence = record.delivery.completionTransportEvidence;
+    // Decode to the allowlist too: stored unknown keys must never leak into tool metadata.
+    delete record.delivery.completionTransportEvidence;
+    retainCompletionTransportEvidence(record, {
+      delivered: true,
+      path: "direct",
+      completionTransportEvidence: evidence,
+    });
+    record.delivery.completionTransportEvidence!.durable = true;
+  }
   return record.runId && record.childSessionKey && record.requesterSessionKey ? record : null;
 }
 
@@ -112,6 +223,15 @@ export function bindCapturedSubagentRunRecord(entry: SubagentRunRecord): BoundSu
 function bindMutableSubagentRunRecord(entry: SubagentRunRecord): BoundSubagentRunRecord {
   const normalized = normalizeSubagentRunState(entry);
   assertCanonicalSubagentRunRecord(normalized);
+  if (normalized.delivery.completionTransportEvidence) {
+    normalized.delivery = {
+      ...normalized.delivery,
+      completionTransportEvidence: {
+        ...normalized.delivery.completionTransportEvidence,
+        durable: undefined,
+      },
+    };
+  }
   return {
     run_id: normalized.runId,
     child_session_key: normalized.childSessionKey,
